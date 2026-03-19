@@ -18,6 +18,7 @@ from data.collector.market_collector import MarketCollector
 from db.session import close_db, init_db
 from execution.order_manager import OrderManager
 from execution.risk import RiskConfig, RiskManager
+from execution.stop_loss import StopLossConfig, StopLossMonitor
 from market.snapshot import MarketSnapshot
 from portfolio.account import AccountManager
 from portfolio.position import PositionManager
@@ -89,7 +90,19 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
         risk=risk,
         event_bus=event_bus,
         default_order_krw=settings.risk_max_order_krw,
+        order_cooldown_sec=settings.order_cooldown_sec,
     )
+
+    # ── Stop-Loss / Take-Profit ───────────────────────────────────────────────
+    stop_loss_monitor = StopLossMonitor(
+        config=StopLossConfig(
+            stop_loss_pct=settings.stop_loss_pct,
+            take_profit_pct=settings.take_profit_pct,
+        ),
+        position_manager=position,
+        event_bus=event_bus,
+    )
+    event_bus.subscribe(EventType.PRICE_UPDATED, stop_loss_monitor.on_price_updated)
 
     # ── Alert ─────────────────────────────────────────────────────────────────
     discord = DiscordAlert(webhook_url=settings.discord_webhook_url)

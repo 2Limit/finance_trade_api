@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     risk_max_daily_loss_krw: Decimal = Decimal("1000000")
     risk_max_position_ratio: float = 0.3  # 포트폴리오 대비 비중
 
+    # ── Stop-Loss / Take-Profit ────────────────────────────
+    stop_loss_pct: float = 0.05       # -5% 이하 자동 손절
+    take_profit_pct: float = 0.10     # +10% 이상 자동 익절
+
+    # ── Order Deduplication ────────────────────────────────
+    order_cooldown_sec: int = 60      # 심볼별 주문 쿨다운 (초)
+
     # ── Logging ────────────────────────────────────────────
     log_level: str = "INFO"
 

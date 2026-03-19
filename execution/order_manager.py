@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -22,11 +23,14 @@ class OrderManager:
 
     흐름:
         SIGNAL_GENERATED 이벤트 수신
+        → 쿨다운 검사 (중복 주문 방지)
         → RiskManager 검증
         → Broker 주문 제출
         → DB 저장
         → ORDER_FILLED / ORDER_FAILED 이벤트 발행
     """
+
+    ORDER_COOLDOWN_SEC: int = 60  # 심볼별 주문 쿨다운 (초)
 
     def __init__(
         self,
@@ -34,11 +38,14 @@ class OrderManager:
         risk: "RiskManager",
         event_bus: EventBus,
         default_order_krw: Decimal = Decimal("100000"),
+        order_cooldown_sec: int | None = None,
     ) -> None:
         self._broker = broker
         self._risk = risk
         self._event_bus = event_bus
         self._default_order_krw = default_order_krw
+        self._cooldown_sec = order_cooldown_sec if order_cooldown_sec is not None else self.ORDER_COOLDOWN_SEC
+        self._last_order_time: dict[str, datetime] = {}
 
     async def on_signal(self, event: Event) -> None:
         """SIGNAL_GENERATED 이벤트 핸들러."""
@@ -50,6 +57,15 @@ class OrderManager:
 
         if signal == SignalType.HOLD.value:
             return
+
+        # 쿨다운 검사: 동일 심볼 연속 주문 방지
+        now = datetime.now(timezone.utc)
+        last = self._last_order_time.get(symbol)
+        if last and (now - last).total_seconds() < self._cooldown_sec:
+            logger.info("쿨다운 중 — 중복 주문 스킵: %s (%.1fs 남음)", symbol,
+                        self._cooldown_sec - (now - last).total_seconds())
+            return
+        self._last_order_time[symbol] = now
 
         side = OrderSide.BUY if signal == SignalType.BUY.value else OrderSide.SELL
 
