@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -39,6 +40,8 @@ class OrderManager:
         event_bus: EventBus,
         default_order_krw: Decimal = Decimal("100000"),
         order_cooldown_sec: int | None = None,
+        dca_split_count: int = 1,
+        dca_interval_sec: float = 5.0,
     ) -> None:
         self._broker = broker
         self._risk = risk
@@ -46,6 +49,9 @@ class OrderManager:
         self._default_order_krw = default_order_krw
         self._cooldown_sec = order_cooldown_sec if order_cooldown_sec is not None else self.ORDER_COOLDOWN_SEC
         self._last_order_time: dict[str, datetime] = {}
+        # DCA 설정
+        self._dca_split_count = max(1, dca_split_count)
+        self._dca_interval_sec = dca_interval_sec
 
     async def on_signal(self, event: Event) -> None:
         """SIGNAL_GENERATED 이벤트 핸들러."""
@@ -89,6 +95,14 @@ class OrderManager:
         if risk_result.adjusted_qty is not None:
             quantity = risk_result.adjusted_qty
 
+        if self._dca_split_count > 1 and side == OrderSide.BUY:
+            # DCA: 분할 매수 (백그라운드 태스크로 순차 실행)
+            split_qty = (quantity / Decimal(self._dca_split_count)).quantize(Decimal("0.00000001"))
+            asyncio.create_task(
+                self._submit_dca(symbol, side, split_qty, strategy_name, price)
+            )
+            return
+
         request = OrderRequest(
             symbol=symbol,
             side=side,
@@ -97,6 +111,20 @@ class OrderManager:
         )
 
         await self._submit(request, strategy_name, price)
+
+    async def _submit_dca(
+        self, symbol: str, side: OrderSide, split_qty: Decimal, strategy_name: str, price: Decimal
+    ) -> None:
+        """DCA 분할 주문: split_count 회 나누어 interval_sec 간격으로 제출."""
+        for i in range(self._dca_split_count):
+            if i > 0:
+                await asyncio.sleep(self._dca_interval_sec)
+            logger.info("DCA %d/%d: %s %s qty=%s", i + 1, self._dca_split_count, side.value, symbol, split_qty)
+            request = OrderRequest(
+                symbol=symbol, side=side,
+                order_type=OrderType.MARKET, quantity=split_qty,
+            )
+            await self._submit(request, strategy_name, price)
 
     async def _submit(
         self, request: OrderRequest, strategy_name: str, current_price: Decimal

@@ -38,17 +38,30 @@ class MACrossoverStrategy(AbstractStrategy):
         self, name: str, symbols: list[str], params: dict[str, Any]
     ) -> None:
         super().__init__(name, symbols, params)
+        self._snapshot: "MarketSnapshot | None" = None
         self._feature_builder: FeatureBuilder | None = None
         self._prev_cross: dict[str, str] = {}  # symbol → "golden" | "dead" | "none"
 
     def set_snapshot(self, snapshot: "MarketSnapshot") -> None:
         """TradingEngine이 주입. 직접 생성하지 않음."""
+        self._snapshot = snapshot
+        self._rebuild_feature_builder()
+
+    def _rebuild_feature_builder(self) -> None:
+        if not hasattr(self, "_snapshot") or self._snapshot is None:
+            return
         self._feature_builder = FeatureBuilder(
-            snapshot=snapshot,
+            snapshot=self._snapshot,
             short_window=self.params.get("short_window", 5),
             long_window=self.params.get("long_window", 20),
             rsi_period=self.params.get("rsi_period", 14),
         )
+
+    def update_params(self, new_params: dict) -> None:
+        """파라미터 갱신 후 FeatureBuilder 재생성."""
+        super().update_params(new_params)
+        self._rebuild_feature_builder()
+        self._prev_cross.clear()  # 크로스 상태 리셋
 
     async def on_tick(self, event: Event, bus: EventBus) -> None:
         symbol: str = event.payload["symbol"]

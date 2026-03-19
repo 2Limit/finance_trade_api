@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -32,6 +32,7 @@ from db.models.balance import BalanceHistoryModel
 from db.models.order import OrderModel
 from db.models.position import PositionModel
 from db.models.signal import SignalModel
+from strategy.store import strategy_store
 
 app = FastAPI(title="Finance Trade Dashboard", docs_url="/api/docs")
 
@@ -52,7 +53,7 @@ def _get_engine():
 
 # ── HTML 템플릿 헬퍼 ─────────────────────────────────────────────────────────
 
-_HTML_BASE = """<!DOCTYPE html>
+_HTML_BASE = r"""<!DOCTYPE html>
 <html lang="ko">
 <head>
   <meta charset="UTF-8">
@@ -88,6 +89,8 @@ _HTML_BASE = """<!DOCTYPE html>
       <a class="nav-link {nav_orders}" href="/orders">Orders</a>
       <a class="nav-link {nav_signals}" href="/signals">Signals</a>
       <a class="nav-link {nav_balances}" href="/balances">Balances</a>
+      <a class="nav-link {nav_strategies}" href="/strategies">Strategies</a>
+      <a class="nav-link {nav_backtest}" href="/backtest">Backtest</a>
     </div>
     <span class="text-muted ms-auto refresh-btn">
       <a href="{current_url}" class="text-secondary text-decoration-none">↻ 새로고침</a>
@@ -104,7 +107,7 @@ _HTML_BASE = """<!DOCTYPE html>
 
 
 def _render(body: str, active: str, current_url: str = "/") -> HTMLResponse:
-    nav = {f"nav_{k}": "" for k in ["overview", "positions", "orders", "signals", "balances"]}
+    nav = {f"nav_{k}": "" for k in ["overview", "positions", "orders", "signals", "balances", "strategies", "backtest"]}
     nav[f"nav_{active}"] = "active"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     html = _HTML_BASE.format(body=body, current_url=current_url, now=now, **nav)
@@ -461,7 +464,119 @@ async def balances_page(request: Request):
     return _render(body, "balances", "/balances")
 
 
+# ── Strategies ───────────────────────────────────────────────────────────────
+
+@app.get("/strategies", response_class=HTMLResponse)
+async def strategies_page(request: Request):
+    strategies = strategy_store.to_dict_list()
+
+    if not strategies:
+        body = """
+        <div class="alert alert-warning">
+          등록된 전략이 없습니다. 트레이딩 엔진과 같은 프로세스로 실행해야 전략이 표시됩니다.
+        </div>"""
+        return _render(body, "strategies", "/strategies")
+
+    cards = ""
+    for s in strategies:
+        param_rows = ""
+        schema = s.get("param_schema", {})
+        for k, v in s["params"].items():
+            sc = schema.get(k, {})
+            desc = sc.get("description", "")
+            type_badge = f'<span class="badge bg-secondary">{sc.get("type", "?")}</span>'
+            param_rows += f"""
+            <tr>
+              <td class="fw-bold">{k}</td>
+              <td>{type_badge}</td>
+              <td><input class="form-control form-control-sm param-input bg-dark text-light border-secondary"
+                         style="width:120px"
+                         data-strategy="{s['name']}" data-key="{k}"
+                         value="{v}" type="{'number' if isinstance(v, (int, float)) else 'text'}"></td>
+              <td class="text-muted small">{desc}</td>
+            </tr>"""
+
+        symbol_badges = " ".join(f'<span class="badge bg-info text-dark">{sym}</span>' for sym in s["symbols"])
+        cards += f"""
+        <div class="col-md-6 col-xl-4">
+          <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+              <span>⚙️ {s['name']}</span>
+              <span class="badge bg-primary">{s['class']}</span>
+            </div>
+            <div class="card-body">
+              <div class="mb-2">심볼: {symbol_badges}</div>
+              <table class="table table-sm mb-2">
+                <thead><tr><th>파라미터</th><th>타입</th><th>현재값</th><th>설명</th></tr></thead>
+                <tbody>{param_rows}</tbody>
+              </table>
+              <button class="btn btn-sm btn-success w-100 apply-btn" data-strategy="{s['name']}">
+                ✓ 적용 (실시간 반영)
+              </button>
+              <div class="apply-result mt-1 small"></div>
+            </div>
+          </div>
+        </div>"""
+
+    body = f"""
+    <div class="row g-3 mb-3">
+      <div class="col-12">
+        <div class="alert alert-info py-2 mb-0">
+          파라미터 수정 후 <strong>적용</strong> 버튼을 누르면 트레이딩 엔진에 즉시 반영됩니다. 재시작 불필요.
+        </div>
+      </div>
+    </div>
+    <div class="row g-3">{cards}</div>
+    <script>
+    document.querySelectorAll('.apply-btn').forEach(btn => {{
+      btn.addEventListener('click', async () => {{
+        const name = btn.dataset.strategy;
+        const inputs = document.querySelectorAll(`.param-input[data-strategy="${{name}}"]`);
+        const params = {{}};
+        inputs.forEach(inp => {{
+          const v = inp.value;
+          params[inp.dataset.key] = isNaN(v) ? v : (v.includes('.') ? parseFloat(v) : parseInt(v));
+        }});
+        const res = await fetch(`/api/strategies/${{name}}/params`, {{
+          method: 'PUT',
+          headers: {{'Content-Type': 'application/json'}},
+          body: JSON.stringify({{params}})
+        }});
+        const result = btn.closest('.card').querySelector('.apply-result');
+        if (res.ok) {{
+          result.innerHTML = '<span class="text-success">✓ 적용 완료</span>';
+        }} else {{
+          result.innerHTML = '<span class="text-danger">✗ 실패: ' + (await res.text()) + '</span>';
+        }}
+        setTimeout(() => result.innerHTML = '', 3000);
+      }});
+    }});
+    </script>"""
+
+    return _render(body, "strategies", "/strategies")
+
+
 # ── JSON API ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/strategies")
+async def api_strategies():
+    return strategy_store.to_dict_list()
+
+
+@app.put("/api/strategies/{name}/params")
+async def api_update_strategy_params(name: str, body: dict):
+    """전략 파라미터 실시간 갱신."""
+    new_params: dict = body.get("params", {})
+    if not new_params:
+        return JSONResponse({"error": "params 필드가 비어 있습니다."}, status_code=400)
+    ok = strategy_store.update_params(name, new_params)
+    if not ok:
+        return JSONResponse(
+            {"error": f"'{name}' 전략을 찾을 수 없습니다. (엔진 미실행 또는 등록 안 됨)"},
+            status_code=404,
+        )
+    return {"strategy": name, "updated_params": new_params}
+
 
 @app.get("/api/positions")
 async def api_positions():
@@ -516,6 +631,139 @@ async def api_signals(limit: int = 20):
          "strength": s.strength, "created_at": str(s.created_at)}
         for s in signals
     ]
+
+
+# ── Backtest ─────────────────────────────────────────────────────────────────
+
+@app.get("/backtest", response_class=HTMLResponse)
+async def backtest_page(request: Request):
+    """백테스트 실행 폼 + 결과 시각화."""
+    form_html = """
+    <div class="card mb-4">
+      <div class="card-header">🔬 백테스트 실행</div>
+      <div class="card-body">
+        <form id="bt-form" class="row g-2">
+          <div class="col-md-2">
+            <label class="form-label small text-muted">전략</label>
+            <select class="form-select form-select-sm bg-dark text-light border-secondary" name="strategy">
+              <option value="ma_crossover">MA Crossover</option>
+              <option value="rsi">RSI</option>
+              <option value="bollinger">Bollinger</option>
+              <option value="macd">MACD</option>
+            </select>
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-muted">심볼</label>
+            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="symbol" value="KRW-BTC">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-muted">캔들 수</label>
+            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="n_candles" type="number" value="120" min="50">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-muted">초기 자본 (KRW)</label>
+            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="initial_balance" type="number" value="1000000">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-muted">short_window</label>
+            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="short_window" type="number" value="5">
+          </div>
+          <div class="col-md-2">
+            <label class="form-label small text-muted">long_window</label>
+            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="long_window" type="number" value="20">
+          </div>
+          <div class="col-12">
+            <button type="submit" class="btn btn-primary btn-sm">▶ 백테스트 실행</button>
+            <span id="bt-status" class="ms-2 text-muted small"></span>
+          </div>
+        </form>
+      </div>
+    </div>
+    <div id="bt-result"></div>
+    <script>
+    document.getElementById('bt-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const fd = new FormData(e.target);
+      const params = Object.fromEntries(fd.entries());
+      document.getElementById('bt-status').textContent = '실행 중...';
+      document.getElementById('bt-result').innerHTML = '';
+      try {
+        const res = await fetch('/api/backtest/run', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(params)
+        });
+        const html = await res.text();
+        document.getElementById('bt-result').innerHTML = html;
+        document.getElementById('bt-status').textContent = '완료';
+      } catch(err) {
+        document.getElementById('bt-status').textContent = '오류: ' + err;
+      }
+    });
+    </script>"""
+
+    return _render(form_html, "backtest", "/backtest")
+
+
+@app.post("/api/backtest/run")
+async def api_backtest_run(body: dict):
+    """백테스트 실행 후 HTML 차트 섹션 반환."""
+    import math
+    from datetime import timedelta
+    from backtest.runner import BacktestRunner
+    from backtest.visualization import render_report_html
+    from market.snapshot import Candle
+    from strategy.impl.ma_crossover import MACrossoverStrategy
+    from strategy.impl.rsi_strategy import RsiStrategy
+    from strategy.impl.bollinger_strategy import BollingerStrategy
+    from strategy.impl.macd_strategy import MacdStrategy
+
+    strategy_name = str(body.get("strategy", "ma_crossover"))
+    symbol = str(body.get("symbol", "KRW-BTC"))
+    n_candles = int(body.get("n_candles", 120))
+    initial_balance = Decimal(str(body.get("initial_balance", "1000000")))
+    short_window = int(body.get("short_window", 5))
+    long_window = int(body.get("long_window", 20))
+
+    # 사인파 시세 시뮬레이션
+    base_time = datetime.now(timezone.utc)
+    prices = [
+        Decimal(str(round(50000000 + 10000000 * math.sin(2 * math.pi * i / 30), 0)))
+        for i in range(n_candles)
+    ]
+    candles = [
+        Candle(
+            symbol=symbol, interval="1m",
+            open=p, high=p * Decimal("1.003"),
+            low=p * Decimal("0.997"), close=p,
+            volume=Decimal("1.0"),
+            timestamp=base_time + timedelta(minutes=i),
+        )
+        for i, p in enumerate(prices)
+    ]
+
+    # 전략 선택
+    strategy_map = {
+        "ma_crossover": (MACrossoverStrategy, {"short_window": short_window, "long_window": long_window, "rsi_period": 14}),
+        "rsi": (RsiStrategy, {"rsi_period": 14, "oversold_level": 30, "overbought_level": 70}),
+        "bollinger": (BollingerStrategy, {"window": long_window, "num_std": 2.0}),
+        "macd": (MacdStrategy, {"fast": 12, "slow": 26, "signal": 9}),
+    }
+    if strategy_name not in strategy_map:
+        return HTMLResponse("<p class='text-danger'>지원하지 않는 전략입니다.</p>")
+
+    StrategyClass, params = strategy_map[strategy_name]
+    strategy = StrategyClass(name=strategy_name, symbols=[symbol], params=params)
+
+    runner = BacktestRunner(
+        strategy=strategy,
+        symbol=symbol,
+        initial_balance=initial_balance,
+    )
+    result = runner.run(candles)
+
+    html = render_report_html(result)
+    return HTMLResponse(html)
 
 
 # ── Entry Point ───────────────────────────────────────────────────────────────

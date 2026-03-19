@@ -328,25 +328,27 @@ class BacktestRunner:
 
     def __init__(
         self,
-        strategy: "MACrossoverStrategy",
-        candles: list[Candle],
+        strategy,
         symbol: str,
         initial_balance: Decimal = Decimal("1_000_000"),
         fee_rate: Decimal = SimulatedPortfolio.DEFAULT_FEE_RATE,
         order_ratio: float = 0.3,
+        candles: list[Candle] | None = None,
     ) -> None:
-        if not candles:
-            raise ValueError("candles는 비어있을 수 없습니다.")
-
         self._strategy = strategy
-        self._candles = sorted(candles, key=lambda c: c.timestamp)
+        self._candles: list[Candle] = sorted(candles, key=lambda c: c.timestamp) if candles else []
         self._symbol = symbol
         self._initial_balance = initial_balance
         self._fee_rate = fee_rate
         self._order_ratio = order_ratio
 
-    def run(self) -> BacktestResult:
+    def run(self, candles: list[Candle] | None = None) -> BacktestResult:
         """캔들을 순서대로 주입하며 전략을 실행. DB 의존성 없음."""
+        if candles is not None:
+            self._candles = sorted(candles, key=lambda c: c.timestamp)
+        if not self._candles:
+            raise ValueError("candles는 비어있을 수 없습니다.")
+
         snapshot = MarketSnapshot()
         portfolio = SimulatedPortfolio(
             initial_balance=self._initial_balance,

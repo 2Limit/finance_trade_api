@@ -24,8 +24,13 @@ from portfolio.account import AccountManager
 from portfolio.position import PositionManager
 from report.daily_report import DailyReportGenerator
 from scheduler import TradingScheduler
+from strategy.aggregator import StrategyAggregator
+from strategy.impl.bollinger_strategy import BollingerStrategy
 from strategy.impl.ma_crossover import MACrossoverStrategy
+from strategy.impl.macd_strategy import MacdStrategy
+from strategy.impl.rsi_strategy import RsiStrategy
 from strategy.registry import StrategyRegistry
+from strategy.store import strategy_store
 
 logger = logging.getLogger(__name__)
 
@@ -122,17 +127,60 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
     # ── Strategies ────────────────────────────────────────────────────────────
     registry = StrategyRegistry()
     registry.register("ma_crossover", MACrossoverStrategy)
+    registry.register("rsi", RsiStrategy)
+    registry.register("bollinger", BollingerStrategy)
+    registry.register("macd", MacdStrategy)
 
+    # MA Crossover
     ma_strategy = registry.create(
         name="ma_crossover",
         symbols=settings.symbols,
         params={"short_window": 5, "long_window": 20, "rsi_period": 14},
     )
-    # MACrossover는 snapshot 주입 필요
     assert isinstance(ma_strategy, MACrossoverStrategy)
     ma_strategy.set_snapshot(snapshot)
 
-    engine.register_strategy(ma_strategy)
+    # RSI
+    rsi_strategy = registry.create(
+        name="rsi",
+        symbols=settings.symbols,
+        params={"rsi_period": 14, "oversold_level": 30.0, "overbought_level": 70.0},
+    )
+    assert isinstance(rsi_strategy, RsiStrategy)
+    rsi_strategy.set_snapshot(snapshot)
+
+    # Bollinger
+    bollinger_strategy = registry.create(
+        name="bollinger",
+        symbols=settings.symbols,
+        params={"window": 20, "num_std": 2.0},
+    )
+    assert isinstance(bollinger_strategy, BollingerStrategy)
+    bollinger_strategy.set_snapshot(snapshot)
+
+    # MACD
+    macd_strategy = registry.create(
+        name="macd",
+        symbols=settings.symbols,
+        params={"fast": 12, "slow": 26, "signal": 9},
+    )
+    assert isinstance(macd_strategy, MacdStrategy)
+    macd_strategy.set_snapshot(snapshot)
+
+    # 개별 전략 엔진 등록
+    for strat in [ma_strategy, rsi_strategy, bollinger_strategy, macd_strategy]:
+        engine.register_strategy(strat)
+        strategy_store.register(strat)  # 대시보드 공유
+
+    # 앙상블 (PRICE_UPDATED 직접 구독 — 엔진의 on_tick과 별개로 동작)
+    aggregator = StrategyAggregator(
+        strategies=[ma_strategy, rsi_strategy, bollinger_strategy],
+        event_bus=event_bus,
+        threshold=0.6,
+        name="aggregator",
+    )
+    event_bus.subscribe(EventType.PRICE_UPDATED, aggregator.on_tick_event)
+
     engine.register_alert(discord)
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
@@ -154,6 +202,15 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
     return engine, scheduler, discord, rest_client
 
 
+async def _run_dashboard(port: int = 8000) -> None:
+    """대시보드 서버를 현재 asyncio 루프에서 실행."""
+    import uvicorn
+    from api.dashboard import app
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+
 async def main() -> None:
     setup_logging()
     logger.info("=== Finance Trade API 시작 ===")
@@ -172,19 +229,12 @@ async def main() -> None:
         loop.add_signal_handler(sig, _handle_signal)
 
     scheduler.start()
+    logger.info("대시보드: http://localhost:8000")
 
     try:
-        # 초기 캔들 수집
-        settings = get_settings()
-        collector = MarketCollector(
-            client=rest_client,
-            snapshot=MarketSnapshot(),  # 이미 engine 내부에서 공유 snapshot 사용
-            symbols=settings.symbols,
-        )
-
-        # 엔진과 종료 대기를 동시 실행
         await asyncio.gather(
             engine.start(),
+            _run_dashboard(port=8000),
             stop_event.wait(),
         )
     finally:
