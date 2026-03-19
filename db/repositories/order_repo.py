@@ -1,25 +1,55 @@
-"""
-OrderRepository: 주문 DB 접근 레이어
-
-책임:
-    - 주문 저장 / 상태 업데이트
-    - 심볼별 / 상태별 주문 조회
-    - execution/ 모듈만 이 Repository를 사용
-"""
 from __future__ import annotations
 
+from sqlalchemy import select, update
+
+from db.models.order import OrderModel
 from db.repositories.base import BaseRepository
-from db.models.order import OrderModel  # 구현 예정
 
 
-class OrderRepository(BaseRepository["OrderModel"]):
-    model = "OrderModel"  # type: ignore[assignment]  # 모델 구현 후 교체
+class OrderRepository(BaseRepository[OrderModel]):
+    model = OrderModel
 
-    async def get_by_order_id(self, order_id: str) -> "OrderModel | None":
-        raise NotImplementedError
+    async def get_by_order_id(self, order_id: str) -> OrderModel | None:
+        result = await self.session.execute(
+            select(OrderModel).where(OrderModel.order_id == order_id)
+        )
+        return result.scalar_one_or_none()
 
-    async def get_open_orders(self, symbol: str) -> list["OrderModel"]:
-        raise NotImplementedError
+    async def get_open_orders(self, symbol: str | None = None) -> list[OrderModel]:
+        stmt = select(OrderModel).where(
+            OrderModel.status.in_(["pending", "partially_filled"])
+        )
+        if symbol:
+            stmt = stmt.where(OrderModel.symbol == symbol)
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
 
-    async def update_status(self, order_id: str, status: str) -> None:
-        raise NotImplementedError
+    async def update_status(
+        self,
+        order_id: str,
+        status: str,
+        executed_qty: str | None = None,
+        executed_price: str | None = None,
+        error_msg: str | None = None,
+    ) -> None:
+        values: dict = {"status": status}
+        if executed_qty is not None:
+            values["executed_qty"] = executed_qty
+        if executed_price is not None:
+            values["executed_price"] = executed_price
+        if error_msg is not None:
+            values["error_msg"] = error_msg
+        await self.session.execute(
+            update(OrderModel)
+            .where(OrderModel.order_id == order_id)
+            .values(**values)
+        )
+
+    async def get_by_symbol(self, symbol: str, limit: int = 50) -> list[OrderModel]:
+        result = await self.session.execute(
+            select(OrderModel)
+            .where(OrderModel.symbol == symbol)
+            .order_by(OrderModel.created_at.desc())
+            .limit(limit)
+        )
+        return list(result.scalars().all())

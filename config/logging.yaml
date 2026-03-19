@@ -1,1 +1,97 @@
-# 로깅 설정
+version: 1
+disable_existing_loggers: false
+
+formatters:
+  standard:
+    format: "%(asctime)s [%(levelname)-8s] %(name)s: %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+  detailed:
+    format: "%(asctime)s [%(levelname)-8s] %(name)s (%(filename)s:%(lineno)d): %(message)s"
+    datefmt: "%Y-%m-%d %H:%M:%S"
+
+handlers:
+  console:
+    class: logging.StreamHandler
+    level: DEBUG
+    formatter: standard
+    stream: ext://sys.stdout
+
+  file:
+    class: logging.handlers.RotatingFileHandler
+    level: INFO
+    formatter: detailed
+    filename: logs/trading.log
+    maxBytes: 10485760   # 10MB
+    backupCount: 5
+    encoding: utf-8
+
+  error_file:
+    class: logging.handlers.RotatingFileHandler
+    level: ERROR
+    formatter: detailed
+    filename: logs/error.log
+    maxBytes: 5242880    # 5MB
+    backupCount: 3
+    encoding: utf-8
+
+loggers:
+  # 트레이딩 시스템
+  core:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  broker:
+    level: INFO
+    handlers: [console, file, error_file]
+    propagate: false
+
+  strategy:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  execution:
+    level: INFO
+    handlers: [console, file, error_file]
+    propagate: false
+
+  portfolio:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  data:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  alert:
+    level: INFO
+    handlers: [console, file]
+    propagate: false
+
+  # 외부 라이브러리 노이즈 억제
+  sqlalchemy.engine:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+
+  websockets:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+
+  httpx:
+    level: WARNING
+    handlers: [console]
+    propagate: false
+
+  apscheduler:
+    level: INFO
+    handlers: [console]
+    propagate: false
+
+root:
+  level: WARNING
+  handlers: [console, file]
