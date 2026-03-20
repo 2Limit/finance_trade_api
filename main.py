@@ -29,6 +29,7 @@ from strategy.aggregator import StrategyAggregator
 from strategy.impl.bollinger_strategy import BollingerStrategy
 from strategy.impl.ma_crossover import MACrossoverStrategy
 from strategy.impl.macd_strategy import MacdStrategy
+from strategy.impl.ml_strategy import MLStrategy
 from strategy.impl.rsi_strategy import RsiStrategy
 from strategy.registry import StrategyRegistry
 from strategy.store import strategy_store
@@ -139,6 +140,7 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
     registry.register("rsi", RsiStrategy)
     registry.register("bollinger", BollingerStrategy)
     registry.register("macd", MacdStrategy)
+    registry.register("ml", MLStrategy)
 
     # MA Crossover
     ma_strategy = registry.create(

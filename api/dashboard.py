@@ -21,7 +21,12 @@ if str(ROOT) not in sys.path:
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from fastapi import FastAPI, Request
+import asyncio
+import json as _json
+import weakref
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -66,7 +71,106 @@ def _get_redis():
     except Exception:
         return None
 
-app = FastAPI(title="Finance Trade Dashboard", docs_url="/api/docs")
+# ── WebSocket 연결 관리자 ────────────────────────────────────────────────────
+
+class WebSocketManager:
+    """
+    연결된 모든 WebSocket 클라이언트를 관리하고 이벤트를 브로드캐스트.
+
+    Redis Stream 'events:all'을 읽어 연결된 클라이언트에 push.
+    Redis 미연결 시 비활성 (연결은 유지되나 메시지 없음).
+    """
+
+    def __init__(self) -> None:
+        self._clients: set[WebSocket] = set()
+        self._task: asyncio.Task | None = None
+
+    async def connect(self, ws: WebSocket) -> None:
+        await ws.accept()
+        self._clients.add(ws)
+        logger.debug("WebSocket 클라이언트 연결: 현재 %d명", len(self._clients))
+
+    def disconnect(self, ws: WebSocket) -> None:
+        self._clients.discard(ws)
+        logger.debug("WebSocket 클라이언트 해제: 현재 %d명", len(self._clients))
+
+    async def broadcast(self, message: str) -> None:
+        dead = set()
+        for ws in self._clients:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.add(ws)
+        self._clients -= dead
+
+    async def start_redis_reader(self) -> None:
+        """Redis Stream 'events:all'을 읽어 WebSocket 클라이언트에 브로드캐스트."""
+        redis = _get_redis()
+        if redis is None:
+            return
+        stream_id = "$"   # 최신 메시지부터 구독
+        try:
+            while True:
+                if not self._clients:
+                    await asyncio.sleep(0.5)
+                    continue
+                try:
+                    results = await redis.xread(
+                        {"events:all": stream_id}, count=20, block=1000
+                    )
+                    if results:
+                        for _name, messages in results:
+                            for msg_id, data in messages:
+                                stream_id = msg_id if isinstance(msg_id, str) else msg_id.decode()
+                                await self._forward(data)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.debug("WebSocket Redis 읽기 오류: %s", e)
+                    await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+
+    async def _forward(self, data: dict) -> None:
+        def _d(v) -> str:
+            return v.decode() if isinstance(v, bytes) else str(v)
+        evt_type = _d(data.get(b"type") or data.get("type", "EVENT"))
+        payload_raw = data.get(b"payload") or data.get("payload", b"{}")
+        ts = _d(data.get(b"ts") or data.get("ts", ""))
+        try:
+            payload = _json.loads(payload_raw)
+        except Exception:
+            payload = {}
+        msg = _json.dumps({"type": evt_type, "payload": payload, "ts": ts})
+        await self.broadcast(msg)
+
+    def start(self) -> None:
+        """애플리케이션 시작 시 백그라운드 태스크 실행."""
+        self._task = asyncio.create_task(self.start_redis_reader())
+
+    async def stop(self) -> None:
+        if self._task:
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+
+import logging
+logger = logging.getLogger(__name__)
+
+ws_manager = WebSocketManager()
+
+
+@asynccontextmanager
+async def lifespan(app):
+    ws_manager.start()
+    yield
+    await ws_manager.stop()
+
+
+app = FastAPI(title="Finance Trade Dashboard", docs_url="/api/docs", lifespan=lifespan)
 
 # ── DB 세션 (대시보드 전용 read-only 연결) ───────────────────────────────────
 
@@ -309,34 +413,43 @@ async def overview(request: Request):
     (function() {{
       const feed = document.getElementById('event-feed');
       const statusBadge = document.getElementById('sse-status');
-      let es = null;
 
       function clearFeed() {{
         feed.innerHTML = '';
       }}
 
-      function connectSSE() {{
-        if (es) es.close();
-        es = new EventSource('/api/stream/events');
-        es.onopen = () => {{
+      let ws = null;
+      let reconnectTimer = null;
+
+      function connectWS() {{
+        if (ws && ws.readyState < 2) return;
+        const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+        ws = new WebSocket(`${{proto}}//${{location.host}}/ws/events`);
+        ws.onopen = () => {{
           statusBadge.textContent = '연결됨';
           statusBadge.className = 'badge bg-success ms-2 small';
+          if (reconnectTimer) {{ clearTimeout(reconnectTimer); reconnectTimer = null; }}
         }};
-        es.onerror = () => {{
+        ws.onclose = () => {{
+          statusBadge.textContent = '재연결 중...';
+          statusBadge.className = 'badge bg-warning ms-2 small';
+          reconnectTimer = setTimeout(connectWS, 3000);
+        }};
+        ws.onerror = () => {{
           statusBadge.textContent = '미연결';
           statusBadge.className = 'badge bg-secondary ms-2 small';
         }};
-        es.onmessage = (e) => appendEvent('EVENT', e.data);
-        ['PRICE_UPDATED','SIGNAL_GENERATED','ORDER_FILLED','RISK_TRIGGERED'].forEach(t => {{
-          es.addEventListener(t, (e) => appendEvent(t, e.data));
-        }});
+        ws.onmessage = (e) => {{
+          try {{
+            const msg = JSON.parse(e.data);
+            appendEvent(msg.type || 'EVENT', msg);
+          }} catch(_) {{}}
+        }};
       }}
 
-      function appendEvent(type, data) {{
+      function appendEvent(type, msg) {{
         const now = new Date().toLocaleTimeString('ko-KR');
-        let payload = {{}};
-        try {{ payload = JSON.parse(data); }} catch(_) {{}}
-        const symbol = payload.payload && payload.payload.symbol ? payload.payload.symbol : '';
+        const symbol = msg.payload && msg.payload.symbol ? msg.payload.symbol : '';
         const color = type === 'SIGNAL_GENERATED' ? '#3fb950'
                     : type === 'ORDER_FILLED' ? '#58a6ff'
                     : type === 'RISK_TRIGGERED' ? '#f85149'
@@ -351,7 +464,7 @@ async def overview(request: Request):
       }}
 
       window.clearFeed = clearFeed;
-      connectSSE();
+      connectWS();
     }})();
     </script>"""
 
@@ -818,6 +931,32 @@ async def stream_events(request: Request, last_id: str = "0-0"):
     return EventSourceResponse(_generator())
 
 
+# ── WebSocket: 실시간 이벤트 피드 ────────────────────────────────────────────
+
+@app.websocket("/ws/events")
+async def ws_events(ws: WebSocket):
+    """
+    WebSocket 실시간 이벤트 피드.
+
+    클라이언트 연결 후 Redis Stream 'events:all'에서
+    새 이벤트가 들어오면 JSON 형식으로 push.
+
+    메시지 형식:
+        { "type": "PRICE_UPDATED", "payload": {...}, "ts": "..." }
+
+    Redis 미연결 시에도 연결은 수락하나 메시지는 없음 (polling fallback 사용).
+    """
+    await ws_manager.connect(ws)
+    try:
+        while True:
+            # 클라이언트 연결 유지용 ping 대기 (클라이언트가 close 보내면 예외)
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        ws_manager.disconnect(ws)
+
+
 # ── Backtest ─────────────────────────────────────────────────────────────────
 
 @app.get("/backtest", response_class=HTMLResponse)
@@ -840,6 +979,7 @@ async def backtest_page(request: Request):
                   <option value="rsi">RSI — 과매도/과매수 반전</option>
                   <option value="bollinger">Bollinger Band — 밴드 반전</option>
                   <option value="macd">MACD — 골든/데드 크로스</option>
+                  <option value="ml">ML Strategy — RandomForest 머신러닝</option>
                 </select>
               </div>
               <div class="col-sm-6 col-md-3">
@@ -1059,6 +1199,17 @@ async def api_backtest_run(body: dict):
             "signal": _int("macd_signal", 9),
         }
         StrategyClass = MacdStrategy
+    elif strategy_name == "ml":
+        from strategy.impl.ml_strategy import MLStrategy
+        strategy_params = {
+            "short_window": _int("short_window", 5),
+            "long_window":  _int("long_window", 20),
+            "rsi_period":   _int("rsi_period", 14),
+            "look_ahead":   _int("macd_signal", 5),   # 폼에서 macd_signal 공유 (look_ahead)
+            "threshold":    _float("num_std", 0.005),  # 폼에서 num_std 공유 (threshold)
+            "n_estimators": 100,
+        }
+        StrategyClass = MLStrategy
     else:
         return HTMLResponse("<p class='text-danger'>지원하지 않는 전략입니다.</p>")
 

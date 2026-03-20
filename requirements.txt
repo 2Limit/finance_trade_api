@@ -37,6 +37,9 @@ sse-starlette>=1.6.0
 # Visualization
 matplotlib>=3.8.0
 
+# ML
+scikit-learn>=1.4.0
+
 # Dev
 pytest>=8.0.0
 pytest-asyncio>=0.23.0

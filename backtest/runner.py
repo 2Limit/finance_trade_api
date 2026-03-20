@@ -362,6 +362,12 @@ class BacktestRunner:
         if hasattr(self._strategy, "set_snapshot"):
             self._strategy.set_snapshot(snapshot)
 
+        # MLStrategy: 학습이 안 된 경우 앞 70% 캔들로 자동 학습 (데이터 누출 방지)
+        if hasattr(self._strategy, "is_trained") and not self._strategy.is_trained():
+            if hasattr(self._strategy, "train"):
+                train_end = max(1, int(len(self._candles) * 0.7))
+                self._strategy.train(self._candles[:train_end])
+
         # FeatureBuilder: 전략이 필요한 만큼 충분한 캔들 히스토리 확보
         req_candles = self._strategy.required_candles()
         feature_builder = FeatureBuilder(

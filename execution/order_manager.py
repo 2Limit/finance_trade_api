@@ -42,6 +42,7 @@ class OrderManager:
         order_cooldown_sec: int | None = None,
         dca_split_count: int = 1,
         dca_interval_sec: float = 5.0,
+        symbol_brokers: dict[str, AbstractBroker] | None = None,
     ) -> None:
         self._broker = broker
         self._risk = risk
@@ -52,6 +53,13 @@ class OrderManager:
         # DCA 설정
         self._dca_split_count = max(1, dca_split_count)
         self._dca_interval_sec = dca_interval_sec
+        # 심볼별 브로커 라우팅 (멀티 거래소): {symbol: broker}
+        # e.g. {"BTC/USDT": binance_broker, "ETH/USDT": binance_broker}
+        self._symbol_brokers: dict[str, AbstractBroker] = symbol_brokers or {}
+
+    def _get_broker(self, symbol: str) -> AbstractBroker:
+        """심볼에 맞는 브로커를 반환. 등록되지 않으면 기본 브로커 사용."""
+        return self._symbol_brokers.get(symbol, self._broker)
 
     async def on_signal(self, event: Event) -> None:
         """SIGNAL_GENERATED 이벤트 핸들러."""
@@ -147,7 +155,8 @@ class OrderManager:
         )
 
         try:
-            result = await self._broker.place_order(request)
+            broker = self._get_broker(request.symbol)
+            result = await broker.place_order(request)
             order_model.order_id = result.order_id
             order_model.status = result.status
             order_model.executed_qty = result.executed_qty
