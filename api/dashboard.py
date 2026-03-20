@@ -26,6 +26,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import desc, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+try:
+    from sse_starlette.sse import EventSourceResponse
+    _SSE_AVAILABLE = True
+except ImportError:
+    _SSE_AVAILABLE = False
+
 import db.models  # noqa: F401  — 모든 모델 등록
 from config import get_settings
 from db.models.balance import BalanceHistoryModel
@@ -33,6 +39,32 @@ from db.models.order import OrderModel
 from db.models.position import PositionModel
 from db.models.signal import SignalModel
 from strategy.store import strategy_store
+
+# ── Redis 클라이언트 (독립 실행 시) ──────────────────────────────────────────
+
+_redis_client = None
+
+
+def _get_redis():
+    """대시보드 독립 실행 시 Redis 클라이언트 반환. 연결 실패 시 None."""
+    global _redis_client
+    if _redis_client is not None:
+        return _redis_client
+    settings = get_settings()
+    if not settings.redis_url:
+        return None
+    try:
+        import redis.asyncio as aioredis
+        _redis_client = aioredis.from_url(
+            settings.redis_url,
+            encoding="utf-8",
+            decode_responses=False,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+        return _redis_client
+    except Exception:
+        return None
 
 app = FastAPI(title="Finance Trade Dashboard", docs_url="/api/docs")
 
@@ -258,7 +290,70 @@ async def overview(request: Request):
           </div>
         </div>
       </div>
-    </div>"""
+    </div>
+    <div class="row g-3 mt-1">
+      <div class="col-12">
+        <div class="card">
+          <div class="card-header d-flex align-items-center">
+            <span>⚡ 실시간 이벤트 피드</span>
+            <span id="sse-status" class="badge bg-secondary ms-2 small">연결 중...</span>
+            <a class="float-end ms-auto text-secondary text-decoration-none small" href="#" onclick="clearFeed()">지우기</a>
+          </div>
+          <div class="card-body p-2" style="max-height:200px;overflow-y:auto;" id="event-feed">
+            <p class="text-muted text-center small py-2">Redis 연결 시 실시간 이벤트가 표시됩니다.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+    (function() {{
+      const feed = document.getElementById('event-feed');
+      const statusBadge = document.getElementById('sse-status');
+      let es = null;
+
+      function clearFeed() {{
+        feed.innerHTML = '';
+      }}
+
+      function connectSSE() {{
+        if (es) es.close();
+        es = new EventSource('/api/stream/events');
+        es.onopen = () => {{
+          statusBadge.textContent = '연결됨';
+          statusBadge.className = 'badge bg-success ms-2 small';
+        }};
+        es.onerror = () => {{
+          statusBadge.textContent = '미연결';
+          statusBadge.className = 'badge bg-secondary ms-2 small';
+        }};
+        es.onmessage = (e) => appendEvent('EVENT', e.data);
+        ['PRICE_UPDATED','SIGNAL_GENERATED','ORDER_FILLED','RISK_TRIGGERED'].forEach(t => {{
+          es.addEventListener(t, (e) => appendEvent(t, e.data));
+        }});
+      }}
+
+      function appendEvent(type, data) {{
+        const now = new Date().toLocaleTimeString('ko-KR');
+        let payload = {{}};
+        try {{ payload = JSON.parse(data); }} catch(_) {{}}
+        const symbol = payload.payload && payload.payload.symbol ? payload.payload.symbol : '';
+        const color = type === 'SIGNAL_GENERATED' ? '#3fb950'
+                    : type === 'ORDER_FILLED' ? '#58a6ff'
+                    : type === 'RISK_TRIGGERED' ? '#f85149'
+                    : '#8b949e';
+        const row = document.createElement('div');
+        row.style.cssText = 'font-size:0.78rem;border-bottom:1px solid #21262d;padding:2px 4px;';
+        row.innerHTML = `<span style="color:#8b949e">${{now}}</span>
+          <span style="color:${{color}};margin:0 6px">${{type}}</span>
+          <span class="text-light">${{symbol}}</span>`;
+        feed.insertBefore(row, feed.firstChild);
+        if (feed.children.length > 50) feed.removeChild(feed.lastChild);
+      }}
+
+      window.clearFeed = clearFeed;
+      connectSSE();
+    }})();
+    </script>"""
 
     return _render(body, "overview", "/")
 
@@ -560,17 +655,50 @@ async def strategies_page(request: Request):
 
 @app.get("/api/strategies")
 async def api_strategies():
-    return strategy_store.to_dict_list()
+    """전략 목록. 엔진과 같은 프로세스면 in-memory, 독립 실행이면 Redis에서 읽는다."""
+    # in-memory 전략이 있으면 우선 반환
+    local = strategy_store.to_dict_list()
+    if local:
+        return local
+    # 없으면 Redis fallback (독립 실행 모드)
+    redis = _get_redis()
+    if redis is not None:
+        try:
+            raw = await redis.hgetall("strategy:configs")
+            if raw:
+                import json as _json
+                return [_json.loads(v) for v in raw.values()]
+        except Exception:
+            pass
+    return []
 
 
 @app.put("/api/strategies/{name}/params")
 async def api_update_strategy_params(name: str, body: dict):
-    """전략 파라미터 실시간 갱신."""
+    """전략 파라미터 실시간 갱신.
+
+    엔진과 같은 프로세스: strategy_store 직접 수정.
+    독립 실행 모드: Redis Pub/Sub 'strategy:param_updates'에 발행 → 엔진이 수신 처리.
+    """
+    import json as _json
+
     new_params: dict = body.get("params", {})
     if not new_params:
         return JSONResponse({"error": "params 필드가 비어 있습니다."}, status_code=400)
+
+    # 동일 프로세스 전략 업데이트
     ok = strategy_store.update_params(name, new_params)
-    if not ok:
+
+    # Redis Pub/Sub 발행 (독립 실행 모드에서 엔진에 전달)
+    redis = _get_redis()
+    if redis is not None:
+        try:
+            payload = _json.dumps({"name": name, "params": new_params})
+            await redis.publish("strategy:param_updates", payload)
+        except Exception:
+            pass  # Redis 실패 시 무시
+
+    if not ok and redis is None:
         return JSONResponse(
             {"error": f"'{name}' 전략을 찾을 수 없습니다. (엔진 미실행 또는 등록 안 됨)"},
             status_code=404,
@@ -631,6 +759,63 @@ async def api_signals(limit: int = 20):
          "strength": s.strength, "created_at": str(s.created_at)}
         for s in signals
     ]
+
+
+# ── SSE: 실시간 이벤트 피드 ──────────────────────────────────────────────────
+
+@app.get("/api/stream/events")
+async def stream_events(request: Request, last_id: str = "0-0"):
+    """
+    Redis Stream 'events:all'을 SSE로 스트리밍.
+
+    클라이언트는 EventSource('/api/stream/events')로 연결한다.
+    Redis 미연결 시 404 반환.
+    """
+    if not _SSE_AVAILABLE:
+        return JSONResponse({"error": "sse-starlette 패키지가 없습니다."}, status_code=503)
+
+    redis = _get_redis()
+    if redis is None:
+        return JSONResponse({"error": "Redis 미연결 — SSE 비활성"}, status_code=503)
+
+    import asyncio as _asyncio
+    import json as _json
+
+    async def _generator():
+        stream_id = last_id
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    results = await redis.xread(
+                        {"events:all": stream_id}, count=20, block=2000
+                    )
+                    if results:
+                        for _stream_name, messages in results:
+                            for msg_id, data in messages:
+                                stream_id = msg_id if isinstance(msg_id, str) else msg_id.decode()
+                                evt_type = (data.get(b"type") or data.get("type", b"")).decode() if isinstance(
+                                    data.get(b"type") or data.get("type", b""), bytes
+                                ) else str(data.get("type", ""))
+                                payload_raw = data.get(b"payload") or data.get("payload", b"{}")
+                                payload = _json.loads(payload_raw)
+                                ts = (data.get(b"ts") or data.get("ts", b"")).decode() if isinstance(
+                                    data.get(b"ts") or data.get("ts", b""), bytes
+                                ) else str(data.get("ts", ""))
+                                yield {
+                                    "event": evt_type,
+                                    "data": _json.dumps({"payload": payload, "ts": ts}),
+                                    "id": stream_id,
+                                }
+                except _asyncio.CancelledError:
+                    break
+                except Exception:
+                    await _asyncio.sleep(1)
+        except _asyncio.CancelledError:
+            pass
+
+    return EventSourceResponse(_generator())
 
 
 # ── Backtest ─────────────────────────────────────────────────────────────────

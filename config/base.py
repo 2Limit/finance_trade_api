@@ -19,7 +19,17 @@ class Settings(BaseSettings):
     env: str = "dev"
 
     # ── Database ───────────────────────────────────────────
+    # dev: sqlite+aiosqlite:///./trading.db
+    # prod: postgresql+asyncpg://user:pw@host:5432/trading
     db_url: str = "sqlite+aiosqlite:///./trading.db"
+
+    # ── Redis ──────────────────────────────────────────────
+    # 미설정 시 Redis 기능 비활성화 (in-memory fallback)
+    redis_url: str = ""
+
+    # ── Event Bus ─────────────────────────────────────────
+    # "memory" | "redis"  (redis_url 설정 시 자동으로 redis 사용)
+    event_bus_backend: str = "memory"
 
     # ── Upbit ──────────────────────────────────────────────
     upbit_access_key: str = ""

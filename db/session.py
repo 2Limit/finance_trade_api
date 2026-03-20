@@ -21,11 +21,16 @@ def get_engine() -> AsyncEngine:
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_async_engine(
-            settings.db_url,
-            echo=not settings.is_prod,  # dev에서만 SQL 로깅
-            pool_pre_ping=True,
-        )
+        kwargs: dict = {
+            "echo": not settings.is_prod,
+            "pool_pre_ping": True,
+        }
+        # PostgreSQL: 커넥션 풀 크기 설정 (SQLite는 풀 미지원)
+        if settings.db_url.startswith("postgresql"):
+            kwargs["pool_size"] = 10
+            kwargs["max_overflow"] = 20
+            kwargs["pool_timeout"] = 30
+        _engine = create_async_engine(settings.db_url, **kwargs)
     return _engine
 
 

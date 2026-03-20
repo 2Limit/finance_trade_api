@@ -30,12 +30,19 @@ target_metadata = Base.metadata
 
 
 def _get_url() -> str:
-    """설정 파일 또는 프로젝트 Settings 에서 DB URL 반환."""
+    """설정 파일 또는 프로젝트 Settings 에서 DB URL 반환.
+
+    offline 모드(SQL 스크립트 생성)는 sync 드라이버 필요:
+      sqlite+aiosqlite  → sqlite
+      postgresql+asyncpg → postgresql+psycopg2
+    """
     try:
         from config import get_settings
         url = get_settings().db_url
-        # aiosqlite → sqlite 로 변환 (alembic offline 모드는 sync 드라이버 필요)
-        return url.replace("aiosqlite", "pysqlite").replace("+aiosqlite", "")
+        # async 드라이버 → sync 드라이버로 변환
+        url = url.replace("sqlite+aiosqlite", "sqlite")
+        url = url.replace("postgresql+asyncpg", "postgresql+psycopg2")
+        return url
     except Exception:
         return config.get_main_option("sqlalchemy.url", "sqlite:///./trading.db")
 

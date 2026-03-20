@@ -14,6 +14,7 @@ from broker.upbit.websocket import UpbitWebSocketFeed
 from config import get_settings
 from core.engine import TradingEngine
 from core.event import EventBus, EventType
+from core.event_bus_redis import RedisEventBus
 from data.collector.market_collector import MarketCollector
 from db.session import close_db, init_db
 from execution.order_manager import OrderManager
@@ -48,14 +49,22 @@ def setup_logging() -> None:
         )
 
 
-async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, UpbitRestClient]:
+async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, UpbitRestClient, EventBus]:
     """모든 컴포넌트를 조립하고 의존성을 주입한다."""
     settings = get_settings()
 
     # ── Infrastructure ────────────────────────────────────────────────────────
     await init_db()
 
-    event_bus = EventBus()
+    # Redis EventBus: redis_url 설정 시 활성화, 없으면 in-memory fallback
+    if settings.redis_url:
+        event_bus: EventBus = RedisEventBus(settings.redis_url)
+        await event_bus.connect()  # type: ignore[union-attr]
+        logger.info("RedisEventBus 활성화")
+    else:
+        event_bus = EventBus()
+        logger.info("in-memory EventBus 사용")
+
     snapshot = MarketSnapshot()
 
     # ── Broker ────────────────────────────────────────────────────────────────
@@ -167,10 +176,18 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
     assert isinstance(macd_strategy, MacdStrategy)
     macd_strategy.set_snapshot(snapshot)
 
+    # Redis 연결된 경우 StrategyStore에 Redis 공유
+    if isinstance(event_bus, RedisEventBus) and event_bus.is_redis_connected:
+        strategy_store.set_redis(event_bus._redis)
+
     # 개별 전략 엔진 등록
     for strat in [ma_strategy, rsi_strategy, bollinger_strategy, macd_strategy]:
         engine.register_strategy(strat)
         strategy_store.register(strat)  # 대시보드 공유
+
+    # Redis StrategyStore 초기 동기화
+    if isinstance(event_bus, RedisEventBus) and event_bus.is_redis_connected:
+        await strategy_store.sync_all_to_redis()
 
     # 앙상블 (PRICE_UPDATED 직접 구독 — 엔진의 on_tick과 별개로 동작)
     aggregator = StrategyAggregator(
@@ -199,7 +216,7 @@ async def build_app() -> tuple[TradingEngine, TradingScheduler, DiscordAlert, Up
     report_generator = DailyReportGenerator(alerts=[discord])
     scheduler.register_daily_report_job(report_generator.generate, hour=9, minute=0)
 
-    return engine, scheduler, discord, rest_client
+    return engine, scheduler, discord, rest_client, event_bus
 
 
 async def _run_dashboard(port: int = 8000) -> None:
@@ -215,7 +232,7 @@ async def main() -> None:
     setup_logging()
     logger.info("=== Finance Trade API 시작 ===")
 
-    engine, scheduler, discord, rest_client = await build_app()
+    engine, scheduler, discord, rest_client, event_bus = await build_app()
 
     # Graceful shutdown
     loop = asyncio.get_running_loop()
@@ -231,18 +248,37 @@ async def main() -> None:
     scheduler.start()
     logger.info("대시보드: http://localhost:8000")
 
+    tasks = [
+        asyncio.create_task(engine.start()),
+        asyncio.create_task(_run_dashboard(port=8000)),
+        asyncio.create_task(stop_event.wait()),
+    ]
+
+    # Redis 파라미터 변경 감시 태스크
+    if isinstance(event_bus, RedisEventBus):
+        async def _on_param_update(data: dict) -> None:
+            name = data.get("name")
+            params = data.get("params", {})
+            if name and params:
+                from strategy.store import strategy_store as _store
+                _store.update_params(name, params)
+                logger.info("파라미터 업데이트 수신: %s → %s", name, params)
+
+        event_bus.add_param_update_callback(_on_param_update)
+        tasks.append(asyncio.create_task(event_bus.watch_param_updates()))
+
     try:
-        await asyncio.gather(
-            engine.start(),
-            _run_dashboard(port=8000),
-            stop_event.wait(),
-        )
+        await asyncio.gather(*tasks, return_exceptions=True)
     finally:
         logger.info("종료 중...")
+        for t in tasks:
+            t.cancel()
         await engine.stop()
         scheduler.stop()
         await rest_client.close()
         await discord.close()
+        if isinstance(event_bus, RedisEventBus):
+            await event_bus.disconnect()
         await close_db()
         logger.info("=== 종료 완료 ===")
 
