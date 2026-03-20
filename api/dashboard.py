@@ -144,6 +144,29 @@ class WebSocketManager:
         msg = _json.dumps({"type": evt_type, "payload": payload, "ts": ts})
         await self.broadcast(msg)
 
+    async def on_event(self, event: object) -> None:
+        """
+        in-process EventBus 핸들러.
+
+        Redis 없이 엔진과 대시보드를 같은 프로세스에서 실행할 때
+        main.py에서 이 메서드를 EventBus에 구독하면 모든 이벤트가
+        WebSocket 클라이언트로 실시간 push 된다.
+        """
+        if not self._clients:
+            return
+        try:
+            import json as _j
+            from core.event import Event  # type: ignore[attr-defined]
+            evt: Event = event  # type: ignore[assignment]
+            msg = _j.dumps({
+                "type": evt.type.name,
+                "payload": evt.payload,
+                "ts": evt.timestamp.isoformat(),
+            }, default=str)
+            await self.broadcast(msg)
+        except Exception as exc:
+            logger.debug("WebSocket in-process 브로드캐스트 실패: %s", exc)
+
     def start(self) -> None:
         """애플리케이션 시작 시 백그라운드 태스크 실행."""
         self._task = asyncio.create_task(self.start_redis_reader())

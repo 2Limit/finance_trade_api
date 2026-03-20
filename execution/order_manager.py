@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING
 from broker.base import AbstractBroker, OrderRequest, OrderSide, OrderType
 from core.event import Event, EventBus, EventType
 from db.models.order import OrderModel
+from db.models.signal import SignalModel
+from db.models.trade import TradeModel
 from db.session import get_session
 from strategy.base import SignalType
 
@@ -68,6 +70,15 @@ class OrderManager:
         signal: str = payload["signal"]
         price = Decimal(str(payload["price"]))
         strategy_name: str = payload.get("strategy", "unknown")
+
+        # 시그널 기록 — 쿨다운/리스크 필터 전, 모든 전략 시그널을 추적
+        await self._save_signal(
+            strategy_name=strategy_name,
+            symbol=symbol,
+            signal_type=signal,
+            strength=float(payload.get("strength", 1.0)),
+            metadata={"price": str(price)},
+        )
 
         if signal == SignalType.HOLD.value:
             return
@@ -164,6 +175,16 @@ class OrderManager:
 
             async with get_session() as session:
                 session.add(order_model)
+                # 체결 내역 기록 — 모든 전략의 TradeModel이 단일 경로에서 저장됨
+                session.add(TradeModel(
+                    order_id=result.order_id,
+                    symbol=result.symbol,
+                    side=result.side.value,
+                    quantity=result.executed_qty,
+                    price=result.executed_price,
+                    strategy_name=strategy_name,
+                    exchange=getattr(broker, "exchange_name", "unknown"),
+                ))
 
             logger.info(
                 "주문 완료: id=%s status=%s qty=%s price=%s",
@@ -204,3 +225,24 @@ class OrderManager:
                     },
                 )
             )
+
+    async def _save_signal(
+        self,
+        strategy_name: str,
+        symbol: str,
+        signal_type: str,
+        strength: float = 1.0,
+        metadata: dict | None = None,
+    ) -> None:
+        """SignalModel DB 저장. 실패해도 트레이딩 흐름 중단 없음."""
+        try:
+            async with get_session() as session:
+                session.add(SignalModel(
+                    strategy_name=strategy_name,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    strength=strength,
+                    metadata_=metadata,
+                ))
+        except Exception:
+            logger.exception("SignalModel 저장 실패 (무시): %s %s", strategy_name, signal_type)

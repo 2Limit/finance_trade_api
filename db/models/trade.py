@@ -32,6 +32,7 @@ class TradeModel(Base):
     )
     fee_currency: Mapped[str] = mapped_column(String(10), default="KRW")
     strategy_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    exchange: Mapped[str] = mapped_column(String(30), default="upbit", index=True)
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, index=True
     )

@@ -50,6 +50,8 @@ class OrderResult:
 class AbstractBroker(ABC):
     """브로커 추상 인터페이스. 거래소마다 구현체를 작성한다."""
 
+    exchange_name: str = "unknown"  # 거래소 식별자 (TradeModel.exchange 기록용)
+
     @abstractmethod
     async def place_order(self, request: OrderRequest) -> OrderResult:
         raise NotImplementedError

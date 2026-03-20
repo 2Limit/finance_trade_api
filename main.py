@@ -250,6 +250,19 @@ async def main() -> None:
     scheduler.start()
     logger.info("대시보드: http://localhost:8000")
 
+    # in-memory 모드: WebSocket 브리지 구독 (Redis 없이도 실시간 push)
+    if not isinstance(event_bus, RedisEventBus):
+        from api.dashboard import ws_manager
+        for _evt_type in (
+            EventType.SIGNAL_GENERATED,
+            EventType.ORDER_FILLED,
+            EventType.ORDER_FAILED,
+            EventType.RISK_TRIGGERED,
+            EventType.PRICE_UPDATED,
+        ):
+            event_bus.subscribe(_evt_type, ws_manager.on_event)
+        logger.info("WebSocket in-process 브리지 구독 완료")
+
     tasks = [
         asyncio.create_task(engine.start()),
         asyncio.create_task(_run_dashboard(port=8000)),

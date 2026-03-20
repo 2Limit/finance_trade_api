@@ -1,270 +1,218 @@
 # 프로그램 확장 제안서 (Extension Proposal)
 
 > 자동화 암호화폐 트레이딩 시스템
-> 작성일: 2026-03-19 | 최종 수정: 2026-03-19 | 버전: 2.0
+> 작성일: 2026-03-19 | 최종 수정: 2026-03-20 | 버전: 3.0
 
 ---
 
 ## 개요
 
-초기 MVP(단일 전략 · 단일 거래소 · 단일 심볼)에서 출발하여 1차 확장을 완료하였습니다.
-현재 시스템은 **DB 영속화 · Alembic 마이그레이션 · 멀티 심볼 백테스트 · 파라미터 최적화 · 일일 리포트 · Email 알림 · 통합 테스트** 를 갖춘 안정화 단계에 있습니다.
-본 제안서는 남은 안정화 항목과 이후 기능 확장 · 아키텍처 고도화의 우선순위 로드맵을 제시합니다.
+MVP(단일 전략 · 단일 거래소 · 단일 심볼)에서 출발하여 Phase 1~3을 완료하였습니다.
+현재 시스템은 **다중 전략 · ML 전략 · 앙상블 · 대시보드 · WebSocket push · Redis 분산 버스 · 완전한 데이터 추적 파이프라인**을 갖춘 안정화 단계에 있습니다.
+본 제안서는 현재까지 완료된 항목과 이후 선택적 고도화 로드맵을 제시합니다.
 
 ---
 
-## 완료된 항목 (2026-03-19 기준)
+## 완료된 항목 (2026-03-20 기준)
 
-| 구분 | 항목 | 파일 |
-|------|------|------|
-| 안정화 | Alembic 마이그레이션 (7개 테이블) | `alembic/` |
-| 안정화 | 일일 손실 카운터 자동 리셋 | `execution/risk.py` + `scheduler.py` |
-| 안정화 | 포지션 내역 DB 영속화 | `db/models/position.py` |
-| 안정화 | 잔고 이력 DB 저장 | `db/models/balance.py` |
-| 안정화 | 통합·E2E 테스트 16개 추가 (총 100개) | `tests/integration/` |
-| 기능 | Email 알림 (aiosmtplib) | `alert/email.py` |
-| 기능 | 멀티 심볼 백테스트 | `backtest/runner.py` |
-| 기능 | 파라미터 최적화 Grid Search | `backtest/optimizer.py` |
-| 기능 | 일일 리포트 생성 | `report/daily_report.py` |
+### Phase 1 — 안정화
+
+| 항목 | 파일 |
+| --- | --- |
+| Alembic 마이그레이션 (7개 테이블) | alembic/ |
+| 일일 손실 카운터 자동 리셋 | execution/risk.py + scheduler.py |
+| 포지션 내역 DB 영속화 | db/models/position.py |
+| 잔고 이력 DB 저장 | db/models/balance.py |
+| 중복 주문 방지 (ORDER_COOLDOWN) | execution/order_manager.py |
+| 손절매 / 익절매 (StopLossMonitor) | execution/stop_loss.py |
+| 통합·E2E 테스트 16개 추가 (총 100개) | tests/integration/ |
+
+### Phase 2 — 기능 확장
+
+| 항목 | 파일 |
+| --- | --- |
+| RSI 전략 | strategy/impl/rsi_strategy.py |
+| 볼린저 밴드 전략 | strategy/impl/bollinger_strategy.py |
+| MACD 전략 | strategy/impl/macd_strategy.py |
+| ML 전략 인터페이스 | strategy/impl/ml_strategy.py |
+| 전략 앙상블 (StrategyAggregator) | strategy/aggregator.py |
+| DCA 분할 매수 | execution/order_manager.py |
+| 멀티 거래소 라우팅 기반 | broker/base.py (exchange_name), order_manager.py |
+| 백테스트 시각화 (adaptive X-axis) | backtest/visualization.py |
+| 파라미터 최적화 Grid Search | backtest/optimizer.py |
+| Email 알림 | alert/email.py |
+| 멀티 심볼 백테스트 | backtest/runner.py |
+| 일일 리포트 생성 | report/daily_report.py |
+| 대시보드 전략 파라미터 실시간 수정 | api/dashboard.py |
+| 백테스트 대시보드 (다전략 지원) | api/dashboard.py |
+
+### Phase 3 — 아키텍처 고도화
+
+| 항목 | 파일 |
+| --- | --- |
+| FastAPI 독립 대시보드 (WebSocket push) | api/dashboard.py |
+| Redis EventBus (Streams + Pub/Sub) | core/event_bus_redis.py |
+| StrategyStore Redis 동기화 | strategy/store.py |
+| **SignalModel 저장 연결** | execution/order_manager.py |
+| **TradeModel 저장 연결** | execution/order_manager.py |
+| **SignalRepository 생성** | db/repositories/signal_repo.py |
+| **TradeModel.exchange 컬럼** | db/models/trade.py |
+| **WebSocket in-process 브리지** | api/dashboard.py, main.py |
 
 ---
 
-## Phase 1 — 안정화 잔여 (Stability Remaining) `우선순위: 높음`
+## 데이터 추적 아키텍처 (현재 상태)
 
-Phase 1 중 아직 구현되지 않은 2개 항목입니다. 운영 투입 전 반드시 완료해야 합니다.
-
-### 1.1 손절매 / 익절매 (Stop-Loss / Take-Profit) `★★★ 최우선`
-
-**배경**: 전략 시그널(MA 크로스)이 늦게 반응하는 구간에서 급격한 손실이 무제한으로 누적될 수 있습니다.
-
-**제안 사항**:
-```python
-# execution/stop_loss.py
-@dataclass
-class StopLossConfig:
-    stop_loss_pct: float = 0.05    # -5% 이하 자동 손절
-    take_profit_pct: float = 0.10  # +10% 이상 자동 익절
-
-class StopLossMonitor:
-    """PRICE_UPDATED 이벤트마다 보유 포지션 수익률 체크."""
-    async def on_price_updated(self, event: Event) -> None:
-        for symbol, position in self._position_mgr.get_all_positions().items():
-            pnl_pct = float(position.unrealized_pnl(price) / (position.avg_price * position.quantity))
-            if pnl_pct <= -self._config.stop_loss_pct:
-                await self._event_bus.publish(Event(SIGNAL_GENERATED, {"signal": "SELL", ...}))
-            elif pnl_pct >= self._config.take_profit_pct:
-                await self._event_bus.publish(Event(SIGNAL_GENERATED, {"signal": "SELL", ...}))
+```text
+전략 시그널 → SignalModel  (strategy_name, symbol, signal_type, strength, metadata)
+주문 체결  → OrderModel   (주문 원장, 상태 추적)
+           → TradeModel   (체결 내역, exchange 컬럼으로 거래소 구분)
+포지션 변경 → PositionModel (avg_price, unrealized_pnl)
+잔고 변경  → BalanceHistoryModel
 ```
 
-**기대 효과**: 전략과 독립적인 리스크 하한선 · 목표 수익 자동 실현
+**모든 저장은 `OrderManager._submit()` 단일 경로를 통과하므로
+MA / RSI / Bollinger / MACD / ML / Aggregator 등 어떤 전략이 추가되어도
+별도 코드 없이 자동으로 추적됩니다.**
 
 ---
 
-### 1.2 중복 주문 방지 (Order Deduplication) `★★★ 최우선`
+## 선택적 고도화 항목 (검토 대기)
 
-**배경**: WebSocket 시세가 연속으로 수신될 때 SIGNAL_GENERATED 이벤트가 연속 발행되면 동일 심볼에 중복 주문이 제출될 수 있습니다.
+아래 항목들은 운영 규모·요구사항에 따라 선택적으로 도입합니다.
 
-**제안 사항**:
-```python
-# execution/order_manager.py 에 추가
-class OrderManager:
-    _last_order_time: dict[str, datetime] = {}
-    ORDER_COOLDOWN_SEC: int = 60  # 설정 가능
+### A. 모니터링 (Prometheus + Grafana)
 
-    async def on_signal(self, event: Event) -> None:
-        symbol = event.payload["symbol"]
-        now = datetime.now(timezone.utc)
-        last = self._last_order_time.get(symbol)
-        if last and (now - last).total_seconds() < self.ORDER_COOLDOWN_SEC:
-            logger.info("쿨다운 중 — 중복 주문 스킵: %s", symbol)
-            return
-        self._last_order_time[symbol] = now
-        ...
+**배경**: 프로덕션 운영 시 메트릭 기반 장애 감지가 필요합니다.
+
+```text
+구현 범위:
+  api/metrics.py  — prometheus_client 기반 /metrics 엔드포인트
+  주요 메트릭:
+    trade_count_total (strategy, exchange, symbol 라벨)
+    signal_count_total (strategy, signal_type 라벨)
+    order_latency_seconds (주문 제출~체결 지연)
+    position_unrealized_pnl (symbol 라벨)
+  Grafana 대시보드 JSON 파일 (grafana/dashboards/)
 ```
 
-**기대 효과**: 슬리피지 및 불필요한 수수료 방지
+**기대 효과**: 실시간 트레이딩 상태 모니터링, 이상 감지 알람
 
 ---
 
-## Phase 2 — 기능 확장 (Feature Enhancement) `우선순위: 중간`
+### B. 로그 집계 (structlog + Loki / ELK)
 
-안정화 완료 후 트레이딩 성능과 운용 편의를 높입니다.
+**배경**: 현재 로컬 파일(trading.log) 기반이라 다중 인스턴스 운영 시 로그가 분산됩니다.
 
-### 2.1 신규 전략 추가 `★★☆`
+```text
+구현 범위:
+  structlog JSON 포맷 — 모든 로거를 structlog로 전환
+  컨텍스트 자동 첨부: strategy_name, symbol, order_id
+  Loki 연동 (Docker Compose promtail 추가) 또는
+  ELK 연동 (Logstash TCP handler)
+```
 
-기존 `StrategyRegistry` + `AbstractStrategy` 구조를 그대로 활용합니다.
-
-**RSI 전략 (`strategy/impl/rsi_strategy.py`)**:
-- 과매도 구간(RSI < 30) 진입 후 30 회복 시 BUY
-- 과매수 구간(RSI > 70) 진입 후 70 이탈 시 SELL
-
-**볼린저 밴드 전략 (`strategy/impl/bollinger_strategy.py`)**:
-- 하단 밴드 터치 후 반등 시 BUY, 상단 밴드 터치 후 하락 시 SELL
-
-**MACD 전략 (`strategy/impl/macd_strategy.py`)**:
-- MACD 라인이 시그널 라인을 상향 돌파 시 BUY, 하향 이탈 시 SELL
-
-**등록 방법**: `StrategyRegistry.register("rsi", RsiStrategy)` 한 줄로 즉시 사용 가능
+**기대 효과**: 전략·심볼·주문 단위 로그 추적, 대시보드 통합
 
 ---
 
-### 2.2 전략 앙상블 (Strategy Aggregator) `★★☆`
+### C. 알림 고도화
 
-**배경**: 단일 전략의 오신호를 여러 전략의 합의로 필터링하여 정확도를 높입니다.
+**배경**: 단순 Discord 알림에서 채널 다양화 및 리포트 고도화가 필요합니다.
 
-**제안 사항**:
-```python
-# strategy/aggregator.py
-class StrategyAggregator:
-    """여러 전략의 시그널을 투표로 취합."""
-    def aggregate(self, signals: list[Signal | None]) -> Signal | None:
-        buy_votes  = sum(1 for s in signals if s and s.signal_type == SignalType.BUY)
-        sell_votes = sum(1 for s in signals if s and s.signal_type == SignalType.SELL)
-        threshold  = len(signals) * 0.6   # 60% 이상 동의 시 발행
-        if buy_votes / len(signals) >= threshold:
-            return Signal(signal_type=SignalType.BUY, ...)
-        if sell_votes / len(signals) >= threshold:
-            return Signal(signal_type=SignalType.SELL, ...)
-        return None
+```text
+구현 범위:
+  Discord rate-limit 처리 — 429 응답 시 exponential backoff 재시도
+  Telegram 알림 채널 추가 (alert/telegram.py — python-telegram-bot)
+  일일 리포트 HTML 포맷 — 자산 곡선 차트 임베드, 전략별 승률 테이블
+  주간/월간 리포트 (scheduler 주기 추가)
 ```
 
 ---
 
-### 2.3 포지션 분할 매수/매도 (DCA) `★★☆`
+### D. PostgreSQL 전환
 
-**배경**: 단일 주문보다 분할 진입/청산으로 가격 리스크를 분산합니다.
+**배경**: SQLite는 동시 쓰기 성능 한계가 있어 고빈도 거래 시 병목이 됩니다.
 
-**제안 사항**:
-- BUY 시그널 시 시그널 강도(strength)에 비례한 3회 분할 매수
-- SELL 시그널 시 50% 부분 매도 → 추가 조건 충족 시 잔여 청산
-- `OrderManager` 에 `split_count`, `split_interval_sec` 설정 추가
+```text
+구현 범위:
+  docker-compose.yml — PostgreSQL 서비스 추가
+  db/session.py — asyncpg 풀 설정 (pool_size, max_overflow)
+  alembic/env.py — asyncpg URL 처리
+  .env.example — DB_URL, REDIS_URL 문서화
+```
+
+**마이그레이션 전략**: Alembic이 이미 준비되어 있어 DB_URL 변경만으로 전환 가능합니다.
 
 ---
 
-### 2.4 멀티 거래소 지원 `★☆☆`
+### E. 멀티 거래소 구현 (Binance)
 
-**배경**: `AbstractBroker` / `AbstractMarketFeed` 가 이미 추상화되어 있어 구현 비용이 낮습니다.
+**배경**: `AbstractBroker`와 `exchange_name` 속성이 이미 준비되어 있어 구현 비용이 낮습니다.
 
+```text
+구현 범위:
+  broker/binance/rest.py    — BinanceRestClient (exchange_name="binance")
+  broker/binance/websocket.py — BinanceWebSocketFeed
+  OrderManager.symbol_brokers 맵으로 심볼별 라우팅
+  TradeModel.exchange 컬럼으로 체결 거래소 자동 구분
 ```
-broker/
-├── upbit/      (완료)
-├── binance/    ← REST + WebSocket 추가
-└── bithumb/    ← REST + WebSocket 추가
-```
 
-**기대 효과**: 거래소 간 가격 차이를 활용한 차익거래(arbitrage) 전략 기반 마련
+**기대 효과**: 거래소 간 가격 차이를 활용한 차익거래 전략 기반 마련
 
 ---
 
-### 2.5 백테스트 결과 시각화 `★☆☆`
+### F. ML 전략 학습 파이프라인
 
-**배경**: 현재 `print_summary()` 텍스트 출력만 지원합니다.
+**배경**: 현재 `MLStrategy`는 사전 학습된 모델을 로드하는 인터페이스만 제공합니다.
 
-**제안 사항**:
-- `matplotlib` 기반 자산 곡선 · 드로다운 · 거래 표시 차트
-- HTML 리포트 자동 생성 (`backtest/report.py`)
-- 파라미터 최적화 결과 히트맵 시각화
+```text
+구현 범위:
+  mlflow 연동 — 모델 버전 관리, 실험 추적
+  학습 데이터: TradeModel + SignalModel 기록 → 라벨 생성
+  피처: Features 객체 (rsi, sma, bollinger, macd) → 고정 벡터
+  온라인 학습: 실거래 결과로 주기적 재학습 (scheduler 활용)
+  SignalModel.metadata_ 에 confidence, model_version 저장
+```
 
 ---
 
-## Phase 3 — 아키텍처 고도화 (Architecture) `우선순위: 낮음 (장기)`
+## 현재 기술 부채 및 권장 조치
 
-서비스 규모가 커질 때 대비한 구조적 개선입니다.
-
-### 3.1 REST API 서버 (FastAPI) `★★☆`
-
-**배경**: CLI 전용 구조에서 웹 대시보드 · 외부 시스템 연동을 가능하게 합니다.
-
-```
-api/
-├── main.py              # FastAPI app (asyncio 공유)
-├── routers/
-│   ├── portfolio.py     # GET /positions, /balances
-│   ├── orders.py        # GET /orders, POST /orders/cancel
-│   ├── backtest.py      # POST /backtest/run
-│   └── strategy.py      # GET/PATCH /strategy/config
-└── schemas/             # Pydantic 요청/응답 스키마
-```
-
-**기대 효과**: React/Vue 대시보드, 모바일 앱, Webhook 연동
-
----
-
-### 3.2 분산 이벤트 버스 (Redis Pub/Sub) `★☆☆`
-
-**배경**: 현재 `EventBus` 는 단일 프로세스 내부 통신 전용입니다. 멀티 프로세스 배포 시 컴포넌트 간 통신이 불가합니다.
-
-```python
-# core/redis_event_bus.py
-class RedisEventBus(EventBus):
-    async def publish(self, event: Event) -> None:
-        await self._redis.publish(event.type.value, event.model_dump_json())
-```
-
-- 수집 서비스 / 전략 서비스 / 주문 서비스를 별도 컨테이너로 분리 가능
-- Kafka로 업그레이드 시 이벤트 순서 보장 및 재처리 지원
-
----
-
-### 3.3 ML 전략 인터페이스 `★☆☆`
-
-```python
-# strategy/impl/ml_strategy.py
-class MLStrategy(AbstractStrategy):
-    def __init__(self, model_path: str, ...): ...
-    def _evaluate(self, features: Features) -> Signal | None:
-        X = self._to_feature_vector(features)
-        pred = self._model.predict([X])[0]
-        ...
-```
-
-- `FeatureBuilder.Features` → 고정 크기 벡터 변환 표준화
-- 모델 재학습 파이프라인 (MLflow 연동)
-- 온라인 학습 지원 (강화학습 에이전트)
+| 항목 | 현황 | 권장 조치 |
+| --- | --- | --- |
+| SQLite | 단일 파일 DB, 동시성 제한 | 고빈도 시 PostgreSQL 전환 (Alembic 준비됨) |
+| API 키 관리 | .env 파일, 평문 저장 | AWS Secrets Manager 도입 |
+| 오류 재시도 | 주문 실패 시 이벤트 발행만 | Exponential Backoff + 최대 횟수 제한 |
+| 로그 수집 | 로컬 파일만 | Loki / ELK 연동 (항목 B) |
+| ML 재학습 | 수동 모델 교체만 | mlflow 파이프라인 (항목 F) |
+| Telegram | 미구현 | 항목 C에서 처리 |
 
 ---
 
 ## 우선순위 로드맵 요약
 
-```
-현재 상태 (안정화 1차 완료, 2026-03-19)
+```text
+현재 상태 (Phase 3 완료, 2026-03-20)
     │
-    │  ✅ Alembic 마이그레이션
-    │  ✅ 일일 손실 자동 리셋
-    │  ✅ 포지션·잔고 DB 영속화
-    │  ✅ Email 알림
-    │  ✅ 멀티 심볼 백테스트 + Grid Search 최적화
-    │  ✅ 일일 리포트
-    │  ✅ 통합·E2E 테스트 (100개)
+    │  ✅ 다중 전략 (MA / RSI / Bollinger / MACD / ML / Aggregator)
+    │  ✅ DCA 분할 매수
+    │  ✅ 손절매 / 익절매
+    │  ✅ SignalModel + TradeModel 저장 연결 (전 전략 자동 추적)
+    │  ✅ TradeModel.exchange 컬럼 (멀티 거래소 준비)
+    │  ✅ SignalRepository (전략별 시그널 분석)
+    │  ✅ FastAPI 대시보드 + WebSocket 실시간 push
+    │  ✅ Redis EventBus + StrategyStore 동기화
+    │  ✅ 백테스트 시각화 (adaptive X-axis)
+    │  ✅ 통합·E2E 테스트 100개
     │
-    ▼ Phase 1 잔여 (즉시 ~ 2주)         ← 지금 여기
-    ├─ 🔴 손절매/익절매 (StopLossMonitor)
-    └─ 🔴 중복 주문 방지 (ORDER_COOLDOWN)
-    │
-    ▼ Phase 2 (1~3개월)
-    ├─ 🟡 신규 전략 — RSI, 볼린저, MACD
-    ├─ 🟡 전략 앙상블 (StrategyAggregator)
-    ├─ 🟡 포지션 분할 매수/매도 (DCA)
-    ├─ 🟠 멀티 거래소 — Binance, Bithumb
-    └─ 🟠 백테스트 시각화 (matplotlib)
-    │
-    ▼ Phase 3 (3~6개월 이후)
-    ├─ 🔵 FastAPI 대시보드 API
-    ├─ 🔵 Redis 분산 이벤트 버스
-    └─ 🔵 ML 전략 인터페이스
+    ▼ 선택적 고도화 (필요 시 순서대로)
+    ├─ 🔵 A. Prometheus + Grafana 모니터링
+    ├─ 🔵 B. structlog + Loki 로그 집계
+    ├─ 🔵 C. 알림 고도화 (Telegram, rate-limit, HTML 리포트)
+    ├─ 🔵 D. PostgreSQL 전환
+    ├─ 🔵 E. 멀티 거래소 구현 (Binance)
+    └─ 🔵 F. ML 학습 파이프라인 (mlflow)
 ```
 
-**범례**: 🔴 즉시 착수 · 🟡 높음 · 🟠 중간 · 🔵 장기
-
----
-
-## 기술 부채 및 주의사항
-
-| 항목 | 현황 | 권장 조치 |
-|------|------|-----------|
-| SQLite → PostgreSQL | 단일 파일 DB, 동시성 제한 | 운영 환경에서 PostgreSQL 전환 (Alembic 이미 준비됨) |
-| API 키 관리 | .env 파일, 평문 저장 | AWS Secrets Manager / HashiCorp Vault 도입 |
-| 오류 재시도 로직 | 주문 실패 시 단순 이벤트 발행만 | Exponential Backoff 재시도 + 최대 횟수 제한 |
-| 손절매 없음 | 전략 시그널에만 의존 | Phase 1 잔여 항목 (StopLossMonitor) 즉시 구현 |
-| 테스트 커버리지 | 단위 84 + 통합·E2E 16 = 100개 | 신규 전략 추가 시 해당 단위 테스트 동시 작성 필수 |
-| 로그 수집 | 로컬 파일만 (trading.log) | ELK Stack / CloudWatch 연동 (Phase 3 이후) |
+**범례**: 🔵 선택적 고도화 (현재 운영 가능, 규모 확장 시 도입)

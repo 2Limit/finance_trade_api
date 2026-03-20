@@ -17,6 +17,8 @@ UPBIT_BASE_URL = "https://api.upbit.com"
 
 
 class UpbitRestClient(AbstractBroker):
+    exchange_name = "upbit"
+
     """
     Upbit REST API v1 구현체.
 
