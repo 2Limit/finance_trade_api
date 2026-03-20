@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -c \"from strategy.store import strategy_store; from strategy.impl.rsi_strategy import RsiStrategy; print\\(''imports ok''\\)\")"
+    ]
+  }
+}

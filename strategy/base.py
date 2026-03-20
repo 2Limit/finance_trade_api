@@ -53,6 +53,10 @@ class AbstractStrategy(ABC):
         """캔들 확정 시 호출. 없으면 None."""
         raise NotImplementedError
 
+    def required_candles(self) -> int:
+        """백테스트용 FeatureBuilder가 확보해야 할 최소 캔들 수. 전략마다 override."""
+        return 50
+
     def update_params(self, new_params: dict[str, Any]) -> None:
         """파라미터 실시간 갱신. 내부 상태 재초기화가 필요한 전략은 override."""
         self.params.update(new_params)

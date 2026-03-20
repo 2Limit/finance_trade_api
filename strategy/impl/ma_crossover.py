@@ -57,6 +57,11 @@ class MACrossoverStrategy(AbstractStrategy):
             rsi_period=self.params.get("rsi_period", 14),
         )
 
+    def required_candles(self) -> int:
+        long = self.params.get("long_window", 20)
+        rsi_p = self.params.get("rsi_period", 14)
+        return max(long, rsi_p + 1) + 15
+
     def update_params(self, new_params: dict) -> None:
         """파라미터 갱신 후 FeatureBuilder 재생성."""
         super().update_params(new_params)

@@ -61,16 +61,20 @@ class FeatureBuilder:
         short_window: int = 5,
         long_window: int = 20,
         rsi_period: int = 14,
+        snapshot_limit: int = 0,
     ) -> None:
         self._snapshot = snapshot
         self._short_window = short_window
         self._long_window = long_window
         self._rsi_period = rsi_period
+        # snapshot_limit > 0 이면 그 값을 사용, 0 이면 자동 계산
+        self._snapshot_limit = snapshot_limit
 
     def build(self, symbol: str) -> Features | None:
         """심볼의 최신 Features를 계산. 데이터 부족 시 None 반환."""
         required = max(self._long_window, self._rsi_period + 1)
-        candles = self._snapshot.get_candles(symbol, limit=required + 10)
+        limit = self._snapshot_limit if self._snapshot_limit > 0 else required + 10
+        candles = self._snapshot.get_candles(symbol, limit=limit)
         if len(candles) < required:
             return None
 

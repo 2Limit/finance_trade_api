@@ -640,52 +640,165 @@ async def backtest_page(request: Request):
     """백테스트 실행 폼 + 결과 시각화."""
     form_html = """
     <div class="card mb-4">
-      <div class="card-header">🔬 백테스트 실행</div>
+      <div class="card-header fw-bold">🔬 백테스트 실행</div>
       <div class="card-body">
-        <form id="bt-form" class="row g-2">
-          <div class="col-md-2">
-            <label class="form-label small text-muted">전략</label>
-            <select class="form-select form-select-sm bg-dark text-light border-secondary" name="strategy">
-              <option value="ma_crossover">MA Crossover</option>
-              <option value="rsi">RSI</option>
-              <option value="bollinger">Bollinger</option>
-              <option value="macd">MACD</option>
-            </select>
+        <form id="bt-form">
+
+          <!-- 공통 설정 -->
+          <div class="mb-3">
+            <div class="text-white small fw-bold mb-2 text-uppercase" style="letter-spacing:.05em">공통 설정</div>
+            <div class="row g-3">
+              <div class="col-sm-6 col-md-3">
+                <label class="form-label small text-white mb-1">전략 선택</label>
+                <select id="bt-strategy" class="form-select form-select-sm bg-dark text-light border-secondary" name="strategy">
+                  <option value="ma_crossover">MA Crossover — 이동평균 교차</option>
+                  <option value="rsi">RSI — 과매도/과매수 반전</option>
+                  <option value="bollinger">Bollinger Band — 밴드 반전</option>
+                  <option value="macd">MACD — 골든/데드 크로스</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-md-3">
+                <label class="form-label small text-white mb-1">거래 심볼</label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="symbol" value="KRW-BTC" placeholder="예: KRW-BTC">
+              </div>
+              <div class="col-sm-6 col-md-3">
+                <label class="form-label small text-white mb-1">캔들 수
+                  <span class="text-secondary" title="시뮬레이션에 사용할 봉 개수. 많을수록 정밀하나 느림">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="n_candles" type="number" value="120" min="50" max="2000">
+              </div>
+              <div class="col-sm-6 col-md-3">
+                <label class="form-label small text-white mb-1">초기 자본 (KRW)</label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="initial_balance" type="number" value="1000000" min="10000" step="100000">
+              </div>
+            </div>
           </div>
-          <div class="col-md-2">
-            <label class="form-label small text-muted">심볼</label>
-            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="symbol" value="KRW-BTC">
+
+          <hr class="border-secondary my-3">
+
+          <!-- 전략별 파라미터 (JS로 전환) -->
+          <div class="mb-3">
+            <div class="text-muted small fw-bold mb-2 text-uppercase" style="letter-spacing:.05em">
+              전략 파라미터 — <span id="bt-strategy-label">MA Crossover</span>
+            </div>
+
+            <!-- MA Crossover -->
+            <div class="bt-params row g-3" id="params-ma_crossover">
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">단기 이동평균 기간 (Short Window)
+                  <span class="text-secondary" title="단기 SMA 계산에 사용할 봉 수. 값이 작을수록 민감하게 반응">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="short_window" type="number" value="5" min="2" max="50">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">장기 이동평균 기간 (Long Window)
+                  <span class="text-secondary" title="장기 SMA 계산에 사용할 봉 수. Short보다 반드시 커야 함">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="long_window" type="number" value="20" min="5" max="200">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">RSI 기간 (RSI Period)
+                  <span class="text-secondary" title="RSI 필터 계산 기간. 일반적으로 14 사용">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="rsi_period" type="number" value="14" min="2" max="50">
+              </div>
+            </div>
+
+            <!-- RSI -->
+            <div class="bt-params row g-3 d-none" id="params-rsi">
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">RSI 계산 기간 (RSI Period)
+                  <span class="text-secondary" title="RSI를 계산할 봉 수. 기본값 14">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="rsi_period" type="number" value="14" min="2" max="50">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">과매도 기준 (Oversold Level)
+                  <span class="text-secondary" title="RSI가 이 값 이하로 진입 후 회복할 때 BUY 시그널">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="oversold_level" type="number" value="30" min="1" max="49" step="1">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">과매수 기준 (Overbought Level)
+                  <span class="text-secondary" title="RSI가 이 값 이상 진입 후 하락할 때 SELL 시그널">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="overbought_level" type="number" value="70" min="51" max="99" step="1">
+              </div>
+            </div>
+
+            <!-- Bollinger -->
+            <div class="bt-params row g-3 d-none" id="params-bollinger">
+              <div class="col-sm-6">
+                <label class="form-label small text-white mb-1">이동평균 기간 (Window)
+                  <span class="text-secondary" title="볼린저 밴드의 중심선(SMA) 계산 기간. 보통 20">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="long_window" type="number" value="20" min="5" max="100">
+              </div>
+              <div class="col-sm-6">
+                <label class="form-label small text-white mb-1">표준편차 배수 (Std Dev Multiplier)
+                  <span class="text-secondary" title="밴드 폭 = 중심선 ± (std × 배수). 클수록 밴드가 넓어짐">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="num_std" type="number" value="2.0" min="0.5" max="5.0" step="0.1">
+              </div>
+            </div>
+
+            <!-- MACD -->
+            <div class="bt-params row g-3 d-none" id="params-macd">
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">단기 EMA 기간 (Fast)
+                  <span class="text-secondary" title="MACD 단기 지수이동평균 기간. 보통 12">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="short_window" type="number" value="12" min="2" max="50">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">장기 EMA 기간 (Slow)
+                  <span class="text-secondary" title="MACD 장기 지수이동평균 기간. 보통 26">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="long_window" type="number" value="26" min="5" max="100">
+              </div>
+              <div class="col-sm-4">
+                <label class="form-label small text-white mb-1">시그널 EMA 기간 (Signal)
+                  <span class="text-secondary" title="MACD 라인의 EMA(시그널 라인) 기간. 보통 9">ⓘ</span>
+                </label>
+                <input class="form-control form-control-sm bg-dark text-light border-secondary" name="macd_signal" type="number" value="9" min="2" max="30">
+              </div>
+            </div>
           </div>
-          <div class="col-md-2">
-            <label class="form-label small text-muted">캔들 수</label>
-            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="n_candles" type="number" value="120" min="50">
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small text-muted">초기 자본 (KRW)</label>
-            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="initial_balance" type="number" value="1000000">
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small text-muted">short_window</label>
-            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="short_window" type="number" value="5">
-          </div>
-          <div class="col-md-2">
-            <label class="form-label small text-muted">long_window</label>
-            <input class="form-control form-control-sm bg-dark text-light border-secondary" name="long_window" type="number" value="20">
-          </div>
-          <div class="col-12">
-            <button type="submit" class="btn btn-primary btn-sm">▶ 백테스트 실행</button>
-            <span id="bt-status" class="ms-2 text-muted small"></span>
+
+          <div class="d-flex align-items-center gap-3">
+            <button type="submit" class="btn btn-primary btn-sm px-4">▶ 백테스트 실행</button>
+            <span id="bt-status" class="text-muted small"></span>
           </div>
         </form>
       </div>
     </div>
     <div id="bt-result"></div>
+
     <script>
+    const stratLabels = {
+      'ma_crossover': 'MA Crossover — 이동평균 교차',
+      'rsi':          'RSI — 과매도/과매수 반전',
+      'bollinger':    'Bollinger Band — 밴드 반전',
+      'macd':         'MACD — 골든/데드 크로스',
+    };
+
+    function switchStrategy(val) {
+      document.querySelectorAll('.bt-params').forEach(el => el.classList.add('d-none'));
+      const target = document.getElementById('params-' + val);
+      if (target) target.classList.remove('d-none');
+      document.getElementById('bt-strategy-label').textContent = stratLabels[val] || val;
+    }
+
+    document.getElementById('bt-strategy').addEventListener('change', e => switchStrategy(e.target.value));
+    switchStrategy('ma_crossover');
+
     document.getElementById('bt-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const fd = new FormData(e.target);
       const params = Object.fromEntries(fd.entries());
-      document.getElementById('bt-status').textContent = '실행 중...';
+      const statusEl = document.getElementById('bt-status');
+      statusEl.textContent = '시뮬레이션 실행 중...';
+      statusEl.className = 'text-warning small';
       document.getElementById('bt-result').innerHTML = '';
       try {
         const res = await fetch('/api/backtest/run', {
@@ -695,9 +808,11 @@ async def backtest_page(request: Request):
         });
         const html = await res.text();
         document.getElementById('bt-result').innerHTML = html;
-        document.getElementById('bt-status').textContent = '완료';
+        statusEl.textContent = '완료';
+        statusEl.className = 'text-success small';
       } catch(err) {
-        document.getElementById('bt-status').textContent = '오류: ' + err;
+        statusEl.textContent = '오류: ' + err;
+        statusEl.className = 'text-danger small';
       }
     });
     </script>"""
@@ -718,17 +833,61 @@ async def api_backtest_run(body: dict):
     from strategy.impl.bollinger_strategy import BollingerStrategy
     from strategy.impl.macd_strategy import MacdStrategy
 
+    def _int(key: str, default: int) -> int:
+        try: return int(body.get(key, default))
+        except (ValueError, TypeError): return default
+
+    def _float(key: str, default: float) -> float:
+        try: return float(body.get(key, default))
+        except (ValueError, TypeError): return default
+
     strategy_name = str(body.get("strategy", "ma_crossover"))
     symbol = str(body.get("symbol", "KRW-BTC"))
-    n_candles = int(body.get("n_candles", 120))
+    n_candles = max(50, _int("n_candles", 120))
     initial_balance = Decimal(str(body.get("initial_balance", "1000000")))
-    short_window = int(body.get("short_window", 5))
-    long_window = int(body.get("long_window", 20))
 
-    # 사인파 시세 시뮬레이션
+    # 전략별 파라미터 추출 (폼 필드명 → 전략 params 키)
+    if strategy_name == "ma_crossover":
+        strategy_params = {
+            "short_window": _int("short_window", 5),
+            "long_window":  _int("long_window", 20),
+            "rsi_period":   _int("rsi_period", 14),
+        }
+        StrategyClass = MACrossoverStrategy
+    elif strategy_name == "rsi":
+        strategy_params = {
+            "rsi_period":       _int("rsi_period", 14),
+            "oversold_level":   _float("oversold_level", 30.0),
+            "overbought_level": _float("overbought_level", 70.0),
+        }
+        StrategyClass = RsiStrategy
+    elif strategy_name == "bollinger":
+        strategy_params = {
+            "window":  _int("long_window", 20),   # 폼에서 long_window 필드 공유
+            "num_std": _float("num_std", 2.0),
+        }
+        StrategyClass = BollingerStrategy
+    elif strategy_name == "macd":
+        strategy_params = {
+            "fast":   _int("short_window", 12),   # 폼에서 short_window 공유
+            "slow":   _int("long_window", 26),    # 폼에서 long_window 공유
+            "signal": _int("macd_signal", 9),
+        }
+        StrategyClass = MacdStrategy
+    else:
+        return HTMLResponse("<p class='text-danger'>지원하지 않는 전략입니다.</p>")
+
+    # 다중 사이클 사인파 시세 (모든 전략이 시그널을 생성할 수 있는 충분한 변동성)
+    # 주기 30봉, 진폭 10% → MA 크로스, RSI 과매도/과매수, 볼린저 이탈, MACD 교차 모두 유도
+    import math as _math
     base_time = datetime.now(timezone.utc)
     prices = [
-        Decimal(str(round(50000000 + 10000000 * math.sin(2 * math.pi * i / 30), 0)))
+        Decimal(str(round(
+            50_000_000
+            + 5_000_000 * _math.sin(2 * _math.pi * i / 30)   # 주 사인파
+            + 1_000_000 * _math.sin(2 * _math.pi * i / 7),   # 단기 잡음 (RSI 반응 강화)
+            0
+        )))
         for i in range(n_candles)
     ]
     candles = [
@@ -742,24 +901,8 @@ async def api_backtest_run(body: dict):
         for i, p in enumerate(prices)
     ]
 
-    # 전략 선택
-    strategy_map = {
-        "ma_crossover": (MACrossoverStrategy, {"short_window": short_window, "long_window": long_window, "rsi_period": 14}),
-        "rsi": (RsiStrategy, {"rsi_period": 14, "oversold_level": 30, "overbought_level": 70}),
-        "bollinger": (BollingerStrategy, {"window": long_window, "num_std": 2.0}),
-        "macd": (MacdStrategy, {"fast": 12, "slow": 26, "signal": 9}),
-    }
-    if strategy_name not in strategy_map:
-        return HTMLResponse("<p class='text-danger'>지원하지 않는 전략입니다.</p>")
-
-    StrategyClass, params = strategy_map[strategy_name]
-    strategy = StrategyClass(name=strategy_name, symbols=[symbol], params=params)
-
-    runner = BacktestRunner(
-        strategy=strategy,
-        symbol=symbol,
-        initial_balance=initial_balance,
-    )
+    strategy = StrategyClass(name=strategy_name, symbols=[symbol], params=strategy_params)
+    runner = BacktestRunner(strategy=strategy, symbol=symbol, initial_balance=initial_balance)
     result = runner.run(candles)
 
     html = render_report_html(result)

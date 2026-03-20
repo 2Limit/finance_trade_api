@@ -335,6 +335,8 @@ class BacktestRunner:
         order_ratio: float = 0.3,
         candles: list[Candle] | None = None,
     ) -> None:
+        if candles is not None and len(candles) == 0:
+            raise ValueError("candles는 비어있을 수 없습니다.")
         self._strategy = strategy
         self._candles: list[Candle] = sorted(candles, key=lambda c: c.timestamp) if candles else []
         self._symbol = symbol
@@ -360,12 +362,14 @@ class BacktestRunner:
         if hasattr(self._strategy, "set_snapshot"):
             self._strategy.set_snapshot(snapshot)
 
-        # FeatureBuilder는 전략과 동일한 파라미터로 생성
+        # FeatureBuilder: 전략이 필요한 만큼 충분한 캔들 히스토리 확보
+        req_candles = self._strategy.required_candles()
         feature_builder = FeatureBuilder(
             snapshot=snapshot,
             short_window=self._strategy.params.get("short_window", 5),
             long_window=self._strategy.params.get("long_window", 20),
             rsi_period=self._strategy.params.get("rsi_period", 14),
+            snapshot_limit=req_candles,
         )
 
         trades: list[BacktestTrade] = []

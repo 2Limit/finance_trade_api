@@ -48,6 +48,12 @@ class MacdStrategy(AbstractStrategy):
     def set_snapshot(self, snapshot: "MarketSnapshot") -> None:
         self._snapshot = snapshot
 
+    def required_candles(self) -> int:
+        # MACD는 slow + signal 개 이상의 데이터 필요
+        slow = self.params.get("slow", 26)
+        signal = self.params.get("signal", 9)
+        return slow + signal + 15
+
     def update_params(self, new_params: dict) -> None:
         super().update_params(new_params)
         self._prev_position.clear()

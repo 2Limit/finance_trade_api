@@ -46,6 +46,9 @@ class BollingerStrategy(AbstractStrategy):
     def set_snapshot(self, snapshot: "MarketSnapshot") -> None:
         self._snapshot = snapshot
 
+    def required_candles(self) -> int:
+        return self.params.get("window", 20) + 15
+
     def update_params(self, new_params: dict) -> None:
         super().update_params(new_params)
         self._prev_zone.clear()

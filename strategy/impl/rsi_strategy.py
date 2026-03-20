@@ -48,6 +48,9 @@ class RsiStrategy(AbstractStrategy):
     def set_snapshot(self, snapshot: "MarketSnapshot") -> None:
         self._snapshot = snapshot
 
+    def required_candles(self) -> int:
+        return self.params.get("rsi_period", 14) + 15
+
     def update_params(self, new_params: dict) -> None:
         super().update_params(new_params)
         self._prev_zone.clear()
@@ -105,7 +108,7 @@ class RsiStrategy(AbstractStrategy):
     def _evaluate_rsi(self, symbol: str, rsi_val: float, oversold: float, overbought: float) -> Signal | None:
         prev = self._prev_zone.get(symbol, "neutral")
 
-            if rsi_val < oversold:
+        if rsi_val < oversold:
             zone = "oversold"
         elif rsi_val > overbought:
             zone = "overbought"
